@@ -10,9 +10,11 @@ runs *local to the NX server* and gives you:
    YAML; diff it against the server; edit and build new rules; push changes back safely.
    Embedded camera/HTTP credentials are automatically redacted out of the YAML.
 2. **Home Assistant-style automations** — a real `trigger → condition → action` engine
-   for the logic NX can't express, built **visually in the browser** (When / And if /
-   Then do) and run by nxre off a live event bus. Actions include calling any URL
-   (webhook), writing to the log, and raising NX generic events / soft triggers.
+   for the logic NX can't express, built with a **fully visual, no-code builder** in the
+   browser (When / And if / Then do). Every field is a dropdown or simple box — pick your
+   event, pick a camera from the live list, stack conditions (match all/any), and choose
+   actions: send an NX notification, call any URL (webhook), trigger a camera output relay,
+   bookmark the moment on a camera, fire a soft trigger, or write to the log.
 
 > **Why a service, not an NX "plugin"?** The NX Server Plugin SDK only supports
 > *analytics / camera / storage* integrations (C++) — there is no in-process slot for a

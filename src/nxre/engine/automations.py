@@ -57,7 +57,7 @@ class AutomationEngine:
         for auto in self.automations:
             if not any(trigger_matches(t, event) for t in auto.trigger):
                 continue
-            if not conditions.evaluate_all(auto.condition, event):
+            if not conditions.evaluate(auto.condition, event, auto.condition_match):
                 log.info("automation %r matched but a condition blocked it", auto.alias)
                 continue
             log.info("automation %r triggered by %s/%s", auto.alias, event.type, event.source)

@@ -49,6 +49,24 @@ def test_unknown_condition_passes():
     assert evaluate_all([Condition(condition="mystery", value="x")], _event())
 
 
+def test_match_any_vs_all():
+    from nxre.engine.conditions import evaluate
+    ev = _event(source="Lobby Cam", caption="quiet")
+    conds = [Condition(condition="source_contains", value="lobby"),
+             Condition(condition="caption_contains", value="intrusion")]
+    assert evaluate(conds, ev, match="any")     # source matches → OR passes
+    assert not evaluate(conds, ev, match="all")  # caption fails → AND fails
+
+
+def test_day_of_week_condition():
+    import datetime as _dt
+    ev = _event()
+    today = _dt.datetime.now().strftime("%a").lower()  # noqa: DTZ005
+    assert evaluate_all([Condition(condition="day_of_week", days=today)], ev)
+    other = "sun" if today != "sun" else "mon"
+    assert not evaluate_all([Condition(condition="day_of_week", days=other)], ev)
+
+
 # -- end-to-end engine ------------------------------------------------------
 async def test_engine_runs_action_when_trigger_and_condition_pass():
     calls = []

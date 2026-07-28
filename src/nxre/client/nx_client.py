@@ -24,6 +24,7 @@ ACTION_MANIFEST_PATH = "/rest/v4/events/manifest/actions"
 EVENT_LOG_PATH = "/rest/v4/events/log"
 GENERIC_EVENT_PATH = "/rest/v4/events/generic"
 SOFT_TRIGGER_PATH = "/rest/v4/events/triggers"
+DEVICES_PATH = "/rest/v4/devices"
 
 
 class NxApiError(RuntimeError):
@@ -129,3 +130,21 @@ class NxClient:
 
     async def fire_soft_trigger(self, body: dict) -> Any:
         return self._unwrap(await self._request("POST", SOFT_TRIGGER_PATH, json=body))
+
+    # -- devices (cameras), bookmarks, and I/O outputs ---------------------
+    async def get_devices(self) -> list[dict]:
+        """All devices (cameras + I/O modules). Used to populate camera pickers."""
+        return list(self._unwrap(await self._request("GET", DEVICES_PATH)))
+
+    async def create_bookmark(self, device_id: str, body: dict) -> Any:
+        """POST /rest/v4/devices/{id}/bookmarks — ``name`` + ``durationMs`` required."""
+        return self._unwrap(
+            await self._request("POST", f"{DEVICES_PATH}/{device_id}/bookmarks", json=body)
+        )
+
+    async def set_device_io(self, device_id: str, ports: dict) -> Any:
+        """PATCH /rest/v4/devices/{id}/io — drive an output relay, e.g.
+        ``{"": {"isActive": true, "autoResetTimeoutMs": 1000}}`` (empty key = default port)."""
+        return self._unwrap(
+            await self._request("PATCH", f"{DEVICES_PATH}/{device_id}/io", json={"ports": ports})
+        )
