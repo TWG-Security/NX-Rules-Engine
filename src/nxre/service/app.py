@@ -339,8 +339,8 @@ boot();
 # HA-style automation builder ("if this then that")
 # ---------------------------------------------------------------------------
 _COMMON_EVENTS = [
-    "motion", "deviceDisconnected", "generic", "softwareTrigger",
-    "networkIssue", "storageFailure", "cameraInput", "analyticsSdkEvent",
+    "analyticsObject", "analytics", "motion", "deviceDisconnected", "generic",
+    "softwareTrigger", "networkIssue", "storageFailure", "cameraInput",
 ]
 
 
@@ -391,6 +391,8 @@ NX events sent here, so make sure an NX rule forwards events to <code>/webhook/n
 
 # Self-contained builder script (plain string, NOT an f-string — avoids brace escaping).
 _FRIENDLY_EVENTS = {
+    "analyticsObject": "An object is detected (person, vehicle, …)",
+    "analytics": "An analytics event occurs",
     "motion": "Motion is detected",
     "deviceDisconnected": "A camera goes offline",
     "cameraInput": "A camera input signal fires",
@@ -426,14 +428,20 @@ function camOpts(useId,sel){if(!CAMERAS.length)return '<option value="">(no came
 function addTrigger(d){d=d||{};
   var r=h('<div class="row"><span class="lead">When</span>'+
     '<select class="grow" data-f="event_type">'+evOpts(d.event_type)+'</select>'+
+    '<input type="text" data-f="object_type" value="'+esc(d.object_type)+'" '+
+      'placeholder="type e.g. person" style="display:none;max-width:150px">'+
     '<span class="lead">on</span>'+
     '<select data-f="scope"><option value="any">any camera</option>'+
       '<option value="one">a specific camera</option></select>'+
     '<select class="grow" data-f="source" style="display:none">'+camOpts(false,d.source)+'</select>'+
     '<button type="button" class="x" onclick="rm(this)">remove</button></div>');
   var scope=r.querySelector('[data-f=scope]'), cam=r.querySelector('[data-f=source]');
+  var etype=r.querySelector('[data-f=event_type]'), obj=r.querySelector('[data-f=object_type]');
   function upd(){cam.style.display=scope.value==='one'?'':'none';}
+  // The object-type filter only makes sense for analytics/object events.
+  function updObj(){obj.style.display=(etype.value==='analyticsObject'||etype.value==='analytics')?'':'none';}
   scope.value=d.source?'one':'any'; upd(); scope.onchange=upd;
+  updObj(); etype.onchange=updObj;
   document.getElementById('triggers').appendChild(r);}
 
 function addCond(d){d=d||{};
@@ -464,7 +472,8 @@ function addCond(d){d=d||{};
 
 function addAct(d){d=d||{};
   var r=h('<div class="row"><span class="lead">Do</span><select data-f="kind">'+
-    '<option value="nx_generic_event">Send an NX notification</option>'+
+    '<option value="nx_mobile_notification">Notify the mobile app (push)</option>'+
+    '<option value="nx_generic_event">Send an NX notification (in-VMS only)</option>'+
     '<option value="http">Call a webhook / URL</option>'+
     '<option value="nx_device_output">Trigger a camera output (relay)</option>'+
     '<option value="nx_bookmark">Bookmark the moment on a camera</option>'+
@@ -474,7 +483,10 @@ function addAct(d){d=d||{};
     '<button type="button" class="x" onclick="rm(this)">remove</button></div>');
   var body=r.querySelector('.body'), ksel=r.querySelector('[data-f=kind]');
   function render(k){
-    if(k==='nx_generic_event')body.innerHTML='<input type="text" class="grow" data-f="caption" value="'+
+    if(k==='nx_mobile_notification')body.innerHTML='<input type="text" class="grow" data-f="title" value="'+
+      esc(d.title)+'" placeholder="Push title, e.g. Person at Front Door"> '+
+      '<input type="text" class="grow" data-f="body" value="'+esc(d.body)+'" placeholder="Body (optional)">';
+    else if(k==='nx_generic_event')body.innerHTML='<input type="text" class="grow" data-f="caption" value="'+
       esc(d.caption)+'" placeholder="Notification text, e.g. Motion at {source}">';
     else if(k==='http')body.innerHTML='<select data-f="method"><option'+(d.method!=='GET'?' selected':'')+
       '>POST</option><option'+(d.method==='GET'?' selected':'')+'>GET</option></select> '+
@@ -488,13 +500,14 @@ function addAct(d){d=d||{};
       esc(d.trigger_id)+'" placeholder="soft trigger id">';
     else body.innerHTML='<input type="text" class="grow" data-f="message" value="'+
       esc(d.message)+'" placeholder="log message">';}
-  ksel.value=d.kind||'nx_generic_event'; render(ksel.value); ksel.onchange=function(){render(ksel.value);};
+  ksel.value=d.kind||'nx_mobile_notification'; render(ksel.value); ksel.onchange=function(){render(ksel.value);};
   document.getElementById('acts').appendChild(r);}
 
 function kids(id){return [].slice.call(document.getElementById(id).children);}
 function collTriggers(){return kids('triggers').map(function(r){
   var o={platform:'nx_event',event_type:val(r,'event_type')};
   if(r.querySelector('[data-f=scope]').value==='one'){var s=val(r,'source');if(s)o.source=s;}
+  var ot=val(r,'object_type'); if(ot)o.object_type=ot;
   return o;}).filter(function(o){return o.event_type;});}
 function collConds(){return kids('conds').map(function(r){
   var f=r.querySelector('[data-f=field]').value;
@@ -505,7 +518,8 @@ function collConds(){return kids('conds').map(function(r){
   return {condition:'caption_contains',value:val(r,'capval')};});}
 function collActs(){return kids('acts').map(function(r){
   var k=r.querySelector('[data-f=kind]').value,o={kind:k};
-  if(k==='nx_generic_event')o.caption=val(r,'caption');
+  if(k==='nx_mobile_notification'){o.title=val(r,'title');o.body=val(r,'body');}
+  else if(k==='nx_generic_event')o.caption=val(r,'caption');
   else if(k==='http'){o.method=val(r,'method');o.url=val(r,'url');}
   else if(k==='nx_device_output')o.device_id=val(r,'device_id');
   else if(k==='nx_bookmark'){o.device_id=val(r,'device_id');o.name=val(r,'bname');}

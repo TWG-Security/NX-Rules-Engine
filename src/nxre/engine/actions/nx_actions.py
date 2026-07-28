@@ -14,6 +14,50 @@ from ...client.nx_client import NxClient
 from ..bus import Event
 from .registry import ActionRegistry
 
+# Mobile push is a *native NX action* (``pushNotification``, "Send Mobile Notification")
+# and NX only delivers it as the action side of a rule — there is no fire-and-forget REST
+# endpoint. So an nxre automation reaches the phone in two hops: it raises a Generic Event
+# tagged with a private source, and a single auto-managed NX "bridge" rule routes that
+# source to the push action. We create the bridge once (idempotent, keyed by its comment)
+# and thereafter every notification is just a Generic Event whose caption/description NX
+# substitutes into the push (``pushNotification`` defaults caption to ``{event.caption}``).
+#
+# Analogy: the bridge rule is a mail slot wired to your phone; nxre just drops labelled
+# envelopes ("nxre.push") through it — it doesn't rewire the phone each time.
+MOBILE_NOTIFY_SOURCE = "nxre.push"
+MOBILE_BRIDGE_COMMENT = "nxre:mobile-push — auto-managed bridge (Generic Event → Send Mobile Notification)"
+
+
+def _bridge_rule_body(users: list[str] | None) -> dict[str, Any]:
+    """Native NX rule: Generic Event (source == nxre.push) → Send Mobile Notification.
+
+    ``users`` is a list of NX user ids; when empty, NX's default push audience (all power
+    users) receives it, matching NX's own default for this action.
+    """
+    action: dict[str, Any] = {"type": "pushNotification"}
+    if users:
+        action["users"] = {"acceptAll": False, "ids": list(users)}
+    return {
+        "event": {"type": "generic", "source": MOBILE_NOTIFY_SOURCE},
+        "action": action,
+        "enabled": True,
+        "schedule": [],
+        "comment": MOBILE_BRIDGE_COMMENT,
+    }
+
+
+async def _send_mobile_notification(client: NxClient, config: dict[str, Any], event: Event) -> Any:
+    """Ensure the push bridge rule exists, then fire the notification's Generic Event."""
+    rules = await client.get_rules()
+    if not any(r.get("comment") == MOBILE_BRIDGE_COMMENT for r in rules):
+        await client.create_rule(_bridge_rule_body(config.get("users")))
+    return await client.create_generic_event({
+        "source": MOBILE_NOTIFY_SOURCE,
+        "caption": config.get("title") or config.get("caption") or event.caption or "NX alert",
+        "description": config.get("body") or config.get("description") or event.description or "",
+        "state": "instant",
+    })
+
 
 def register_nx_actions(registry: ActionRegistry, client: NxClient) -> None:
     async def nx_generic_event(config: dict[str, Any], event: Event, ctx: dict[str, Any]) -> Any:
@@ -28,8 +72,12 @@ def register_nx_actions(registry: ActionRegistry, client: NxClient) -> None:
     async def nx_soft_trigger(config: dict[str, Any], event: Event, ctx: dict[str, Any]) -> Any:
         return await client.fire_soft_trigger({"triggerId": config["trigger_id"]})
 
+    async def nx_mobile_notification(config: dict[str, Any], event: Event, ctx: dict[str, Any]) -> Any:
+        return await _send_mobile_notification(client, config, event)
+
     registry.register("nx_generic_event", nx_generic_event)
     registry.register("nx_soft_trigger", nx_soft_trigger)
+    registry.register("nx_mobile_notification", nx_mobile_notification)
 
 
 def register_nx_actions_factory(
@@ -85,7 +133,12 @@ def register_nx_actions_factory(
         async with _client() as client:
             return await client.set_device_io(str(device_id), {port: port_cmd})
 
+    async def nx_mobile_notification(config: dict[str, Any], event: Event, ctx: dict[str, Any]) -> Any:
+        async with _client() as client:
+            return await _send_mobile_notification(client, config, event)
+
     registry.register("nx_generic_event", nx_generic_event)
     registry.register("nx_soft_trigger", nx_soft_trigger)
     registry.register("nx_bookmark", nx_bookmark)
     registry.register("nx_device_output", nx_device_output)
+    registry.register("nx_mobile_notification", nx_mobile_notification)

@@ -5,7 +5,7 @@ import respx
 
 from nxre.engine.actions.builtin import register_builtin_actions
 from nxre.engine.actions.registry import ActionRegistry
-from nxre.engine.automations import AutomationEngine
+from nxre.engine.automations import AutomationEngine, trigger_matches
 from nxre.engine.bus import Event, EventBus
 from nxre.engine.conditions import evaluate_all
 from nxre.models.automation import Automation, Condition
@@ -15,6 +15,28 @@ def _event(**kw):
     base = {"type": "motion", "source": "Lobby Cam", "caption": "", "description": ""}
     base.update(kw)
     return Event(**base)
+
+
+# -- triggers ---------------------------------------------------------------
+def test_trigger_object_type_matches_caption_and_raw():
+    from nxre.models.automation import Trigger
+
+    trig = Trigger(platform="nx_event", event_type="analyticsObject", object_type="person")
+    # object type surfaced in the caption
+    assert trigger_matches(trig, _event(type="analyticsObject", caption="Person detected"))
+    # ...or only in the raw objectTypeId the webhook forwarded
+    assert trigger_matches(
+        trig, Event(type="analyticsObject", raw={"objectTypeId": "nx.base.Person"})
+    )
+    # a vehicle detection must not satisfy a person filter
+    assert not trigger_matches(trig, _event(type="analyticsObject", caption="Vehicle detected"))
+
+
+def test_trigger_object_type_any_does_not_filter():
+    from nxre.models.automation import Trigger
+
+    trig = Trigger(platform="nx_event", event_type="analyticsObject", object_type="any")
+    assert trigger_matches(trig, _event(type="analyticsObject", caption="Vehicle detected"))
 
 
 # -- conditions -------------------------------------------------------------

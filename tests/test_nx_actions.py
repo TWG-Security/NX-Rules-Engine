@@ -76,3 +76,53 @@ async def test_generic_event_action():
     await reg.dispatch("nx_generic_event", {"caption": "Alert!"},
                        Event(type="motion", source="Lobby"), {})
     assert b'"caption":"Alert!"' in route.calls.last.request.content
+
+
+# -- mobile push (bridge rule + generic event) ------------------------------
+@respx.mock
+async def test_mobile_notification_creates_bridge_then_fires():
+    """First use with no bridge yet: create the pushNotification bridge rule, then fire."""
+    _login()
+    respx.get(f"{BASE}/rest/v4/events/rules").mock(
+        return_value=httpx.Response(200, json={"result": []})
+    )
+    create_rule = respx.post(f"{BASE}/rest/v4/events/rules").mock(
+        return_value=httpx.Response(200, json={"result": {"id": "r1"}})
+    )
+    generic = respx.post(f"{BASE}/rest/v4/events/generic").mock(
+        return_value=httpx.Response(200, json={"result": {}})
+    )
+    reg = _registry()
+    await reg.dispatch("nx_mobile_notification", {"title": "Person at door", "body": "Front Yard"},
+                       Event(type="analyticsObject", source="Front Yard"), {})
+    assert create_rule.called
+    rbody = create_rule.calls.last.request.content
+    assert b'"pushNotification"' in rbody
+    assert b'"nxre.push"' in rbody          # bridge matches only our tagged events
+    gbody = generic.calls.last.request.content
+    assert b'"source":"nxre.push"' in gbody
+    assert b'"caption":"Person at door"' in gbody
+
+
+@respx.mock
+async def test_mobile_notification_reuses_existing_bridge():
+    """When the bridge already exists (matched by its comment) we must not create another."""
+    from nxre.engine.actions.nx_actions import MOBILE_BRIDGE_COMMENT
+
+    _login()
+    respx.get(f"{BASE}/rest/v4/events/rules").mock(
+        return_value=httpx.Response(200, json={"result": [
+            {"id": "r1", "comment": MOBILE_BRIDGE_COMMENT},
+        ]})
+    )
+    create_rule = respx.post(f"{BASE}/rest/v4/events/rules").mock(
+        return_value=httpx.Response(200, json={"result": {}})
+    )
+    generic = respx.post(f"{BASE}/rest/v4/events/generic").mock(
+        return_value=httpx.Response(200, json={"result": {}})
+    )
+    reg = _registry()
+    await reg.dispatch("nx_mobile_notification", {"title": "Hi"},
+                       Event(type="analyticsObject", source="Cam"), {})
+    assert not create_rule.called
+    assert generic.called
