@@ -11,9 +11,14 @@ ExecStart=/opt/nxre/.venv/bin/nxre serve
 Restart=on-failure
 RestartSec=5
 
-# NX local service-account password — set this (do NOT put it in the YAML config).
+# Where the browser-login bearer token is cached. Kept out of $HOME because
+# ProtectHome=true hides it; /opt/nxre stays writable under ProtectSystem=full.
+Environment=NXRE_SESSION_FILE=/opt/nxre/session.json
+
+# OPTIONAL — only for unattended startup with no browser to log in through.
+# Set a local NX service-account password here (never in the YAML config):
 # Environment=NXRE__TWG__PASSWORD=change-me
-# Add one line per writable system, e.g. Environment=NXRE__MEDEVAC__PASSWORD=...
+# A live browser login always takes precedence; this is just the fallback.
 
 # Hardening
 NoNewPrivileges=true

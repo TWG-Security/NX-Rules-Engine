@@ -20,6 +20,9 @@ from ruamel.yaml import YAML
 DEFAULT_CONFIG_FILENAME = "nxre.config.yaml"
 ENV_CONFIG_VAR = "NXRE_CONFIG"
 
+# What `nxre serve` assumes when no config exists: the NX server on the same box.
+DEFAULT_LOCAL_BASE_URL = "https://127.0.0.1:7001"
+
 
 class NxSystem(BaseModel):
     """Connection details for a single NX Witness site."""
@@ -64,6 +67,23 @@ class Settings(BaseModel):
         except KeyError:
             known = ", ".join(sorted(self.systems)) or "(none configured)"
             raise KeyError(f"Unknown NX system {target!r}. Configured: {known}") from None
+
+    def system_or_local(self, name: str | None = None) -> NxSystem:
+        """Like :meth:`system`, but invent a sensible localhost default if absent.
+
+        This is what lets ``nxre serve`` run with zero config on the NX box: if the
+        requested system isn't listed, assume the mediaserver is right here on
+        ``127.0.0.1:7001`` and register it so later lookups find it.
+        """
+        target = name or self.default_system
+        if target not in self.systems:
+            self.systems[target] = NxSystem(
+                name=target,
+                base_url=DEFAULT_LOCAL_BASE_URL,
+                verify_tls=False,
+                writable=True,
+            )
+        return self.systems[target]
 
 
 def find_config_path(explicit: str | os.PathLike[str] | None = None) -> Path | None:

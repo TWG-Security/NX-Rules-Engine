@@ -21,21 +21,36 @@ python3 -m venv "${PREFIX}/.venv"
 "${PREFIX}/.venv/bin/pip" install --upgrade pip >/dev/null
 "${PREFIX}/.venv/bin/pip" install "${PREFIX}" >/dev/null
 
+echo ">> Writing default config (assumes NX on this box at 127.0.0.1:7001)"
+if [[ ! -f "${PREFIX}/nxre.config.yaml" ]]; then
+  cp "${PREFIX}/nxre.config.example.yaml" "${PREFIX}/nxre.config.yaml"
+fi
+
 echo ">> Installing systemd unit"
 install -m 0644 "${SERVICE_SRC}" /etc/systemd/system/nxre.service
 systemctl daemon-reload
 
+echo ">> Enabling and starting nxre"
+systemctl enable --now nxre
+
+# Figure out the port the service is actually serving on (default 8787).
+PORT="$(sed -n 's/^[[:space:]]*port:[[:space:]]*\([0-9]\+\).*/\1/p' "${PREFIX}/nxre.config.yaml" | head -n1)"
+PORT="${PORT:-8787}"
+
 cat <<EOF
 
-nxre installed to ${PREFIX}.
+nxre is installed and running.
 
-Next steps:
-  1. Put your config at ${PREFIX}/nxre.config.yaml
-  2. Set the NX service-account password in the unit:
-       sudoedit /etc/systemd/system/nxre.service      # [Service] Environment=NXRE__TWG__PASSWORD=...
-       sudo systemctl daemon-reload
-  3. Start it:
-       sudo systemctl enable --now nxre
-       journalctl -u nxre -f
+  ->  Open  http://127.0.0.1:${PORT}  in a browser and sign in with your NX account.
+
+That's it. The service assumes NX is on this host (https://127.0.0.1:7001); edit
+${PREFIX}/nxre.config.yaml if that's not the case, then: sudo systemctl restart nxre
+
+Handy:
+  systemctl status nxre
+  journalctl -u nxre -f        # live log
+
+For unattended restarts with no browser, you can instead set a service-account
+password in the unit (Environment=NXRE__TWG__PASSWORD=...) — optional.
 
 EOF

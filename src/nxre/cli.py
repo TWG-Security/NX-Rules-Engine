@@ -16,7 +16,6 @@ Network commands hit one NX site (``--system``, default from config).
 from __future__ import annotations
 
 import asyncio
-import sys
 import time
 
 import httpx
@@ -55,14 +54,6 @@ def _open_client(sys_cfg: NxSystem) -> NxClient:
     """Build a client seeded with any cached user session token for this system."""
     token = SessionStore().load(sys_cfg.name)
     return NxClient(sys_cfg, token=token)
-
-
-def _has_usable_auth(sys_cfg: NxSystem) -> bool:
-    """True if we can talk to NX without prompting (live session or service pw)."""
-    token = SessionStore().load(sys_cfg.name)
-    if token is not None and token.is_valid():
-        return True
-    return bool(sys_cfg.resolved_password())
 
 
 def _interactive_login(sys_cfg: NxSystem, *, username: str | None = None) -> Token:
@@ -359,36 +350,23 @@ def serve_cmd(
 
     settings = _settings()
     sys_name = _system(settings, system)
-    sys_cfg = settings.system(sys_name)
+    # Zero-config: with no config file we assume the NX server is on this box
+    # (https://127.0.0.1:7001). You log in through the web page, so no credential is
+    # needed at startup — the service just binds and serves the login screen.
+    sys_cfg = settings.system_or_local(sys_name)
 
-    # The service reuses your `nxre login` session. If there's no usable credential
-    # yet, prompt now (before binding the port). Unattended restarts — systemd, Docker —
-    # have no TTY to prompt on, so they need either a still-valid cached token or a
-    # configured service-account password; otherwise we fail fast with guidance.
-    store = SessionStore()
-    if not _has_usable_auth(sys_cfg):
-        if sys.stdin.isatty():
-            try:
-                _interactive_login(sys_cfg)
-            except auth.AuthError as exc:
-                console.print(f"[red]{exc}[/]")
-                raise typer.Exit(1) from None
-        else:
-            console.print(
-                f"[red]No valid NX session for {sys_name!r} and no service-account "
-                f"password configured.[/] Run `nxre login` first, or set "
-                f"NXRE__{sys_name.upper()}__PASSWORD for unattended startup."
-            )
-            raise typer.Exit(1)
-
-    token = store.load(sys_name)
-    authed_user = store.username(sys_name) if token and token.is_valid() else sys_cfg.username
-    app_obj = create_app(settings, sys_name, authenticated_user=authed_user)
+    bind_port = port or settings.webhook.port
+    app_obj = create_app(settings, sys_name)
+    token = SessionStore().load(sys_name)
+    if token and token.is_valid():
+        who = f"signed in as [bold]{SessionStore().username(sys_name)}[/]"
+    else:
+        who = "[yellow]not signed in yet[/]"
     console.print(
-        f"[green]nxre serving[/] for [bold]{sys_name}[/] as [bold]{authed_user}[/] — "
-        f"POST NX events to {settings.webhook.public_url}/webhook/nx"
+        f"[green]nxre serving[/] for [bold]{sys_name}[/] ({sys_cfg.base_url}) — {who}.\n"
+        f"Open [bold]http://127.0.0.1:{bind_port}[/] in a browser to log in."
     )
-    uvicorn.run(app_obj, host=host or settings.webhook.host, port=port or settings.webhook.port)
+    uvicorn.run(app_obj, host=host or settings.webhook.host, port=bind_port)
 
 
 if __name__ == "__main__":
