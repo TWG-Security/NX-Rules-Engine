@@ -9,9 +9,10 @@ runs *local to the NX server* and gives you:
 1. **Native rules as code** — pull every NX event rule into readable, version-controlled
    YAML; diff it against the server; edit and build new rules; push changes back safely.
    Embedded camera/HTTP credentials are automatically redacted out of the YAML.
-2. **Home Assistant-style automations** *(Phase 2+)* — a real `trigger → condition →
-   action` engine for the logic NX can't express, fed by a live event bus and able to
-   act across your stack.
+2. **Home Assistant-style automations** — a real `trigger → condition → action` engine
+   for the logic NX can't express, built **visually in the browser** (When / And if /
+   Then do) and run by nxre off a live event bus. Actions include calling any URL
+   (webhook), writing to the log, and raising NX generic events / soft triggers.
 
 > **Why a service, not an NX "plugin"?** The NX Server Plugin SDK only supports
 > *analytics / camera / storage* integrations (C++) — there is no in-process slot for a
@@ -40,8 +41,12 @@ nxre rules pull            # you're off
 ```bash
 sudo installer/install.sh          # installs, assumes NX at 127.0.0.1:7001, starts the service
 ```
-Then open **http://127.0.0.1:8787** in a browser, sign in with your NX account, and
-**manage rules right in the page** — list, create, edit, enable/disable, delete. That's it.
+Then open **http://127.0.0.1:8787** in a browser and sign in with your NX account. From there:
+- **Automations (if-this-then-that)** — build `When → And if → Then do` workflows visually.
+- **Native NX rules** — list, create, edit, enable/disable, delete NX's own event rules.
+
+Automations react to NX events forwarded to the service, so create the one-click
+**"forward events to nxre"** NX rule (Rules → New → template) to feed the engine.
 Re-running the installer after `git pull` updates in place (clean venv rebuild + restart).
 
 ### Docker

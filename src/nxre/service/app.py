@@ -23,22 +23,25 @@ from urllib.parse import parse_qs
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from ruamel.yaml import YAML
+from pydantic import ValidationError
 
+from .. import autos
 from ..client import auth
 from ..client.manifest import Manifest
 from ..client.nx_client import NxApiError, NxClient
 from ..config import NxSystem, Settings
+from ..engine.actions.builtin import register_builtin_actions
+from ..engine.actions.nx_actions import register_nx_actions_factory
+from ..engine.actions.registry import ActionRegistry
 from ..engine.automations import AutomationEngine
 from ..engine.bus import EventBus
 from ..engine.ingest.webhook import handle_payload
-from ..models.automation import Automation
+from ..models.automation import Action, Automation, Condition, Trigger
 from ..models.rule import NativeRule
 from ..rules import repo
 from ..session import SessionStore
 
 log = logging.getLogger("nxre.service")
-_yaml = YAML(typ="safe")
 
 # TWG Security brand palette (fallback values; see TWGsecurity.com).
 _RED = "#C0392B"
@@ -53,22 +56,6 @@ _FALLBACK_ACTIONS = [
     "writeToLog", "http", "bookmark", "showPopup", "sendEmail",
     "playSound", "deviceOutput",
 ]
-
-
-def load_automations(settings: Settings, system: str) -> list[Automation]:
-    """Load HA-style automations for a system from ``<automations_dir>/<system>/*.yaml``."""
-    directory = settings.automations_dir / system
-    if not directory.exists():
-        return []
-    automations: list[Automation] = []
-    for path in sorted(directory.glob("*.yaml")):
-        with open(path, encoding="utf-8") as fh:
-            data = _yaml.load(fh)
-        if not data:
-            continue
-        items = data if isinstance(data, list) else [data]
-        automations.extend(Automation.from_yaml_obj(item) for item in items)
-    return automations
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +113,13 @@ def _page(title: str, body: str, max_width: int = 420) -> str:
   .small {{ font-size:12px; color:#9aa0a6; }}
   code {{ background:#1b1b1b; padding:2px 6px; border-radius:5px; font-size:12px; }}
   a.link {{ color:#f0a39b; }}
+  h2 {{ font-size:16px; margin:24px 0 4px; }}
+  h2 .small {{ font-weight:400; }}
+  .blk {{ position:relative; border:1px solid #333; border-radius:10px; padding:10px 14px 14px;
+         margin:10px 0; background:#1e1e1e; }}
+  .blk .del {{ position:absolute; top:8px; right:8px; background:#3a2a2a; padding:3px 9px; font-size:12px; }}
+  .hint {{ background:#20262e; border:1px solid #33455a; color:#a9c7e6; padding:10px 12px;
+          border-radius:8px; font-size:13px; margin:12px 0; }}
 </style></head><body><div class="card">
 <div class="brand">TWG <span>Security</span></div>
 {body}
@@ -157,7 +151,8 @@ def _status_page(system: str, base_url: str, user: str, expires_in_min: int, eve
 <div class="row"><span class="k">Signed in as</span><span class="v">{html.escape(user)}</span></div>
 <div class="row"><span class="k">Session valid</span><span class="v">~{expires_in_min} min</span></div>
 <div class="row"><span class="k">Events received</span><span class="v">{events}</span></div>
-<a class="btn block" href="/rules">Manage rules &rarr;</a>
+<a class="btn block" href="/automations">Automations (if&nbsp;this&nbsp;then&nbsp;that) &rarr;</a>
+<a class="btn ghost block" href="/rules">Native NX rules &rarr;</a>
 <form class="logout" method="post" action="/logout">
   <button class="ghost block" type="submit">Sign out</button></form>"""
     return _page("Status — NX Rules Engine", body)
@@ -266,6 +261,195 @@ def _rule_form_page(
     return _page(f"{title} — NX Rules Engine", body, max_width=640)
 
 
+# ---------------------------------------------------------------------------
+# HA-style automation builder ("if this then that")
+# ---------------------------------------------------------------------------
+_COMMON_EVENTS = [
+    "motion", "deviceDisconnected", "generic", "softwareTrigger",
+    "networkIssue", "storageFailure", "cameraInput", "analyticsSdkEvent",
+]
+
+
+def _automations_list_page(
+    system: str, items: list[Automation], notice: str = "", error: str = "",
+) -> str:
+    banner = f'<div class="ok-banner">{html.escape(notice)}</div>' if notice else ""
+    banner += f'<div class="err">{html.escape(error)}</div>' if error else ""
+    rows = ""
+    for a in items:
+        aid = a.id or ""
+        state = "on" if a.enabled else "off"
+        toggle = "Disable" if a.enabled else "Enable"
+        when = ", ".join(
+            t.model_dump().get("event_type", t.model_dump().get("platform", "?")) for t in a.trigger
+        ) or "—"
+        then = ", ".join(x.kind for x in a.action) or "—"
+        rows += (
+            f'<tr><td>{html.escape(a.alias)}</td>'
+            f'<td><span class="pill {state}">{state.upper()}</span></td>'
+            f'<td>{html.escape(when)}</td><td>{html.escape(then)}</td>'
+            f'<td class="acts">'
+            f'<a class="btn ghost" href="/automations/{html.escape(aid)}/edit">Edit</a>'
+            f'<form method="post" action="/automations/{html.escape(aid)}/toggle">'
+            f'<button class="ghost" type="submit">{toggle}</button></form>'
+            f'<form method="post" action="/automations/{html.escape(aid)}/delete" '
+            f'onsubmit="return confirm(\'Delete this automation?\')">'
+            f'<button type="submit">Delete</button></form></td></tr>'
+        )
+    if not rows:
+        rows = '<tr><td colspan="5" class="small">No automations yet — create one.</td></tr>'
+    body = f"""
+<div class="topbar">
+  <h1 style="margin:0">Automations — {html.escape(system)}</h1>
+  <a class="link" href="/">&larr; Status</a>
+</div>
+<p class="muted">If-this-then-that rules run by nxre. <a class="btn" href="/automations/new">+ New automation</a></p>
+{banner}
+<div class="hint">Automations react to NX events sent to this service. If nothing triggers,
+create the <a class="link" href="/rules/new?template=webhook">forward-events-to-nxre</a> NX rule
+so events flow in.</div>
+<table>
+  <tr><th>Name</th><th>State</th><th>When</th><th>Then do</th><th></th></tr>
+  {rows}
+</table>"""
+    return _page("Automations — NX Rules Engine", body, max_width=900)
+
+
+# Self-contained builder script (plain string, NOT an f-string — avoids brace escaping).
+_BUILDER_JS = r"""
+function esc(v){return (v==null?'':String(v)).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+  .replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function h(s){var t=document.createElement('template');t.innerHTML=s.trim();return t.content.firstChild;}
+function wrap(inner){return '<div class="blk">'+inner+
+  '<button type="button" class="del" onclick="this.closest(\'.blk\').remove()">remove</button></div>';}
+function vis(sel, blk){var val=sel.value;
+  blk.querySelectorAll('[data-when]').forEach(function(d){
+    d.style.display = d.getAttribute('data-when').split(',').indexOf(val)>=0 ? '' : 'none';});}
+function mkSelect(el, field, pairs, current){
+  var sel=el.querySelector('select[data-f='+field+']');
+  pairs.forEach(function(p){var o=document.createElement('option');o.value=p[0];o.textContent=p[1];
+    if(p[0]===current)o.selected=true;sel.appendChild(o);});
+  return sel;}
+
+function addTrigger(d){d=d||{};
+  var el=h(wrap(
+    '<label>NX event type</label>'+
+    '<input data-f="event_type" list="evtypes" placeholder="e.g. motion" value="'+esc(d.event_type)+'">'+
+    '<label>From source contains (optional)</label><input data-f="source" value="'+esc(d.source)+'">'+
+    '<label>Caption contains (optional)</label><input data-f="caption" value="'+esc(d.caption)+'">'));
+  document.getElementById('triggers').appendChild(el);}
+
+function addCondition(d){d=d||{};
+  var el=h(wrap(
+    '<label>Condition</label><select data-f="condition"></select>'+
+    '<div data-when="caption_contains,source_contains,event_type_is,description_contains">'+
+    '<label>Value</label><input data-f="value" value="'+esc(d.value)+'"></div>'+
+    '<div data-when="time_between"><label>After (HH:MM)</label><input data-f="after" value="'+esc(d.after)+'">'+
+    '<label>Before (HH:MM)</label><input data-f="before" value="'+esc(d.before)+'"></div>'));
+  var sel=mkSelect(el,'condition',[['caption_contains','Caption contains'],
+    ['source_contains','Source contains'],['event_type_is','Event type is'],
+    ['description_contains','Description contains'],['time_between','Time of day between']],
+    d.condition||'caption_contains');
+  sel.onchange=function(){vis(sel,el);};
+  document.getElementById('conditions').appendChild(el); vis(sel,el);}
+
+function addAction(d){d=d||{};
+  var el=h(wrap(
+    '<label>Action</label><select data-f="kind"></select>'+
+    '<div data-when="log"><label>Message</label><input data-f="message" value="'+esc(d.message)+'"></div>'+
+    '<div data-when="http"><label>Method</label><select data-f="method"></select>'+
+    '<label>URL</label><input data-f="url" placeholder="https://..." value="'+esc(d.url)+'">'+
+    '<label>Body (optional)</label><textarea data-f="body">'+esc(d.body)+'</textarea></div>'+
+    '<div data-when="nx_generic_event"><label>Caption</label><input data-f="caption" value="'+esc(d.caption)+'">'+
+    '<label>Source</label><input data-f="source" value="'+esc(d.source)+'"></div>'+
+    '<div data-when="nx_soft_trigger"><label>Trigger ID</label><input data-f="trigger_id" value="'+esc(d.trigger_id)+'"></div>'));
+  var sel=mkSelect(el,'kind',[['log','Write to log'],['http','Call a URL (webhook)'],
+    ['nx_generic_event','Raise NX generic event'],['nx_soft_trigger','Fire NX soft trigger']],
+    d.kind||'log');
+  mkSelect(el,'method',[['POST','POST'],['GET','GET'],['PUT','PUT']], d.method||'POST');
+  sel.onchange=function(){vis(sel,el);};
+  document.getElementById('actions').appendChild(el); vis(sel,el);}
+
+function coll(id){
+  return [].map.call(document.getElementById(id).querySelectorAll('.blk'), function(b){
+    var o={};
+    b.querySelectorAll('[data-f]').forEach(function(inp){
+      var grp=inp.closest('[data-when]'); if(grp && grp.style.display==='none') return;
+      var v=(inp.value||'').trim(); if(v!=='') o[inp.getAttribute('data-f')]=v;});
+    return o;});}
+
+function serialize(){
+  var triggers=coll('triggers').map(function(t){t.platform='nx_event';return t;});
+  var alias=document.getElementById('alias').value.trim();
+  if(!alias){alert('Give the automation a name.');return false;}
+  if(triggers.length===0){alert('Add at least one trigger (the "When").');return false;}
+  var actions=coll('actions');
+  if(actions.length===0){alert('Add at least one action (the "Then do").');return false;}
+  var payload={id:(INITIAL.id||null), alias:alias,
+    enabled:document.getElementById('enabled').checked,
+    mode:document.getElementById('mode').value,
+    trigger:triggers, condition:coll('conditions'), action:actions};
+  document.getElementById('payload').value=JSON.stringify(payload);
+  return true;}
+
+var INITIAL={};
+function boot(){
+  if(INITIAL && (INITIAL.trigger||INITIAL.action)){
+    document.getElementById('alias').value=INITIAL.alias||'';
+    document.getElementById('enabled').checked=INITIAL.enabled!==false;
+    document.getElementById('mode').value=INITIAL.mode||'single';
+    (INITIAL.trigger||[]).forEach(addTrigger);
+    (INITIAL.condition||[]).forEach(addCondition);
+    (INITIAL.action||[]).forEach(addAction);
+  } else { addTrigger(); addAction(); }
+}
+"""
+
+
+def _automation_builder_page(
+    system: str, initial: dict, action_url: str, is_edit: bool, error: str = "",
+) -> str:
+    err = f'<div class="err">{html.escape(error)}</div>' if error else ""
+    datalist = "".join(f'<option value="{html.escape(e)}">' for e in _COMMON_EVENTS)
+    modes = "".join(
+        f'<option value="{m}">{m}</option>' for m in ("single", "restart", "queued", "parallel")
+    )
+    head = f"""
+<div class="topbar">
+  <h1 style="margin:0">{"Edit automation" if is_edit else "New automation"}</h1>
+  <a class="link" href="/automations">&larr; Automations</a>
+</div>
+{err}
+<datalist id="evtypes">{datalist}</datalist>
+<form method="post" action="{action_url}" onsubmit="return serialize()">
+  <input type="hidden" name="payload" id="payload">
+  <label for="alias">Name</label>
+  <input id="alias" type="text" placeholder="e.g. Alert on lobby camera offline">
+  <div class="check"><input id="enabled" type="checkbox" checked>
+    <label for="enabled" style="margin:0">Enabled</label></div>
+  <label for="mode">Run mode</label><select id="mode">{modes}</select>
+
+  <h2>When <span class="small">— a trigger starts the automation</span></h2>
+  <div id="triggers"></div>
+  <button type="button" class="ghost" onclick="addTrigger()">+ Add trigger</button>
+
+  <h2>And if <span class="small">(optional) — all conditions must pass</span></h2>
+  <div id="conditions"></div>
+  <button type="button" class="ghost" onclick="addCondition()">+ Add condition</button>
+
+  <h2>Then do <span class="small">— actions run in order</span></h2>
+  <div id="actions"></div>
+  <button type="button" class="ghost" onclick="addAction()">+ Add action</button>
+
+  <button class="block" type="submit">{"Save changes" if is_edit else "Create automation"}</button>
+</form>
+<script>{_BUILDER_JS}
+INITIAL = {json.dumps(initial)};
+boot();
+</script>"""
+    return _page(f"{'Edit' if is_edit else 'New'} automation — NX Rules Engine", head, max_width=760)
+
+
 def create_app(settings: Settings, system: str | None = None) -> FastAPI:
     system = system or settings.default_system
     sys_cfg: NxSystem = settings.system_or_local(system)
@@ -273,14 +457,6 @@ def create_app(settings: Settings, system: str | None = None) -> FastAPI:
     app = FastAPI(title="nxre", version="0.1.0")
 
     bus = EventBus()
-    automations = load_automations(settings, system)
-    engine = AutomationEngine(automations)
-    engine.attach(bus)
-
-    app.state.bus = bus
-    app.state.engine = engine
-    app.state.system = system
-    app.state.session_store = store
 
     def _valid_token():
         token = store.load(system)
@@ -289,6 +465,23 @@ def create_app(settings: Settings, system: str | None = None) -> FastAPI:
     def _client() -> NxClient | None:
         token = _valid_token()
         return NxClient(sys_cfg, token=token) if token else None
+
+    # Wire the action registry so automations actually DO something: provider-agnostic
+    # actions (log, http) plus NX actions that resolve the current login at fire time.
+    registry = ActionRegistry()
+    register_builtin_actions(registry)
+    register_nx_actions_factory(registry, _client)
+
+    engine = AutomationEngine(autos.load_all(settings, system), registry=registry)
+    engine.attach(bus)
+
+    def _reload_engine() -> None:
+        engine.set_automations(autos.load_all(settings, system))
+
+    app.state.bus = bus
+    app.state.engine = engine
+    app.state.system = system
+    app.state.session_store = store
 
     async def _manifest_types(client: NxClient) -> tuple[list[str], list[str]]:
         try:
@@ -515,6 +708,86 @@ def create_app(settings: Settings, system: str | None = None) -> FastAPI:
                 return RedirectResponse(f"/rules?error={html.escape(str(exc))}", status_code=303)
         return RedirectResponse("/rules?notice=Rule+deleted", status_code=303)
 
+    # -- browser UI: automations (if-this-then-that) ------------------------
+    def _build_automation(data: dict) -> Automation:
+        triggers = [Trigger(**t) for t in data.get("trigger", []) if isinstance(t, dict)]
+        conds = [Condition(**c) for c in data.get("condition", []) if isinstance(c, dict)]
+        acts = [Action(**a) for a in data.get("action", []) if isinstance(a, dict)]
+        mode = data.get("mode", "single")
+        if mode not in ("single", "restart", "queued", "parallel"):
+            mode = "single"
+        return Automation(
+            id=(data.get("id") or None),
+            alias=(data.get("alias") or "").strip() or "unnamed automation",
+            enabled=bool(data.get("enabled", True)), mode=mode,
+            trigger=triggers, condition=conds, action=acts,
+        )
+
+    @app.get("/automations", response_class=HTMLResponse)
+    async def automations_index(notice: str = "", error: str = ""):
+        if _valid_token() is None:
+            return RedirectResponse("/", status_code=303)
+        return HTMLResponse(
+            _automations_list_page(system, autos.load_all(settings, system), notice, error)
+        )
+
+    @app.get("/automations/new", response_class=HTMLResponse)
+    async def automations_new():
+        if _valid_token() is None:
+            return RedirectResponse("/", status_code=303)
+        return HTMLResponse(_automation_builder_page(system, {}, "/automations/save", is_edit=False))
+
+    @app.get("/automations/{auto_id}/edit", response_class=HTMLResponse)
+    async def automations_edit(auto_id: str):
+        if _valid_token() is None:
+            return RedirectResponse("/", status_code=303)
+        auto = autos.get(settings, system, auto_id)
+        if auto is None:
+            return RedirectResponse("/automations?error=Automation+not+found", status_code=303)
+        return HTMLResponse(_automation_builder_page(
+            system, auto.model_dump(exclude_none=True), "/automations/save", is_edit=True))
+
+    @app.post("/automations/save")
+    async def automations_save(request: Request):
+        if _valid_token() is None:
+            return RedirectResponse("/", status_code=303)
+        form = parse_qs((await request.body()).decode("utf-8"))
+        try:
+            data = json.loads((form.get("payload") or ["{}"])[0])
+        except json.JSONDecodeError:
+            return RedirectResponse("/automations?error=Could+not+read+the+form", status_code=303)
+        is_edit = bool(data.get("id"))
+        try:
+            auto = _build_automation(data)
+            if not auto.trigger or not auto.action:
+                raise ValueError("Add at least one trigger and one action.")
+        except (ValidationError, ValueError) as exc:
+            return HTMLResponse(
+                _automation_builder_page(system, data, "/automations/save", is_edit, error=str(exc)),
+                status_code=400,
+            )
+        autos.save(settings, system, auto)
+        _reload_engine()
+        return RedirectResponse("/automations?notice=Automation+saved", status_code=303)
+
+    @app.post("/automations/{auto_id}/toggle")
+    async def automations_toggle(auto_id: str):
+        if _valid_token() is None:
+            return RedirectResponse("/", status_code=303)
+        auto = autos.get(settings, system, auto_id)
+        if auto is not None:
+            autos.set_enabled(settings, system, auto_id, not auto.enabled)
+            _reload_engine()
+        return RedirectResponse("/automations?notice=Automation+updated", status_code=303)
+
+    @app.post("/automations/{auto_id}/delete")
+    async def automations_delete(auto_id: str):
+        if _valid_token() is None:
+            return RedirectResponse("/", status_code=303)
+        autos.delete(settings, system, auto_id)
+        _reload_engine()
+        return RedirectResponse("/automations?notice=Automation+deleted", status_code=303)
+
     # -- health & webhook ---------------------------------------------------
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -524,7 +797,7 @@ def create_app(settings: Settings, system: str | None = None) -> FastAPI:
             "system": system,
             "authenticated": token is not None,
             "authenticated_user": store.username(system) if token else None,
-            "automations": len(automations),
+            "automations": len(engine.automations),
             "events_seen": len(bus.recent),
         }
 

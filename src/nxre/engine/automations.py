@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 
 from ..models.automation import Automation, Trigger
+from . import conditions
 from .actions.registry import ActionRegistry
 from .bus import Event, EventBus
 
@@ -42,8 +43,12 @@ def trigger_matches(trigger: Trigger, event: Event) -> bool:
 
 class AutomationEngine:
     def __init__(self, automations: list[Automation], registry: ActionRegistry | None = None):
-        self.automations = [a for a in automations if a.enabled]
+        self.set_automations(automations)
         self.registry = registry
+
+    def set_automations(self, automations: list[Automation]) -> None:
+        """Replace the active automation set (only the enabled ones run)."""
+        self.automations = [a for a in automations if a.enabled]
 
     def attach(self, bus: EventBus) -> None:
         bus.subscribe(self._on_event)
@@ -52,9 +57,10 @@ class AutomationEngine:
         for auto in self.automations:
             if not any(trigger_matches(t, event) for t in auto.trigger):
                 continue
+            if not conditions.evaluate_all(auto.condition, event):
+                log.info("automation %r matched but a condition blocked it", auto.alias)
+                continue
             log.info("automation %r triggered by %s/%s", auto.alias, event.type, event.source)
-            if auto.condition:
-                log.info("  (conditions carried but not evaluated in Phase 1: %d)", len(auto.condition))
             if self.registry:
                 await self._run_actions(auto, event)
 
