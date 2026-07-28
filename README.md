@@ -6,9 +6,12 @@ NX's built-in event-rules engine is opaque, un-versioned, edited one rule at a t
 GUI, and stores credentials in plaintext. `nxre` is a **bolt-on companion service** that
 runs *local to the NX server* and gives you:
 
-1. **Native rules as code** — pull every NX event rule into readable, version-controlled
-   YAML; diff it against the server; edit and build new rules; push changes back safely.
-   Embedded camera/HTTP credentials are automatically redacted out of the YAML.
+1. **Native NX rules** — build, edit, enable/disable, and delete NX's own event rules
+   from a **visual, no-code editor in the browser** whose fields come straight from your
+   server's manifest (so it mirrors NX's own editor: analytics object type + attributes,
+   multi-camera pickers, HTTP action, etc.). These are real NX rules — they show up in NX
+   and NX runs them. Also available as version-controlled YAML via the CLI (pull/diff/apply,
+   with embedded credentials auto-redacted).
 2. **Home Assistant-style automations** — a real `trigger → condition → action` engine
    for the logic NX can't express, built with a **fully visual, no-code builder** in the
    browser (When / And if / Then do). Every field is a dropdown or simple box — pick your

@@ -49,6 +49,37 @@ class Manifest:
     def required_action_fields(self, action_type: str) -> list[str]:
         return self._required_fields(self.actions.get(action_type, {}))
 
+    # -- builder-friendly views --------------------------------------------
+    def event_items(self) -> list[dict]:
+        """Each event type as ``{id, displayName, flags, fields[]}`` for the UI builder."""
+        return self._items(self.events)
+
+    def action_items(self) -> list[dict]:
+        return self._items(self.actions)
+
+    @staticmethod
+    def _items(catalog: dict[str, Any]) -> list[dict]:
+        out: list[dict] = []
+        for type_id, spec in (catalog or {}).items():
+            if not isinstance(spec, dict):
+                continue
+            fields = [
+                {
+                    "type": f.get("type", ""),
+                    "fieldName": f.get("fieldName", ""),
+                    "displayName": f.get("displayName") or f.get("fieldName", ""),
+                }
+                for f in (spec.get("fields") or [])
+                if isinstance(f, dict) and f.get("fieldName")
+            ]
+            out.append({
+                "id": type_id,
+                "displayName": spec.get("displayName") or type_id,
+                "flags": spec.get("flags", ""),
+                "fields": fields,
+            })
+        return sorted(out, key=lambda x: x["displayName"].lower())
+
     @staticmethod
     def _required_fields(spec: dict[str, Any]) -> list[str]:
         """Field names the manifest marks non-optional (``optional: false``)."""
