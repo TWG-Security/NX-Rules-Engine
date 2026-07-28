@@ -35,9 +35,12 @@ class NxApiError(RuntimeError):
 class NxClient:
     """A live connection to one NX site. Use as an async context manager."""
 
-    def __init__(self, system: NxSystem, *, timeout: float = 15.0):
+    def __init__(self, system: NxSystem, *, token: Token | None = None, timeout: float = 15.0):
         self.system = system
-        self._token: Token | None = None
+        # A caller (e.g. `nxre login`) can hand us a cached user session token. If it
+        # lapses and the system also has a service-account password, we re-login with
+        # that; otherwise we surface a clear "run `nxre login`" error.
+        self._token: Token | None = token
         self._client = httpx.AsyncClient(
             base_url=system.base_url.rstrip("/"),
             verify=system.verify_tls,
@@ -55,11 +58,18 @@ class NxClient:
 
     # -- auth ---------------------------------------------------------------
     async def _ensure_token(self) -> Token:
-        if self._token is None or not self._token.is_valid():
-            self._token = await auth.login(
-                self._client, self.system.username, self.system.resolved_password()
-            )
-        return self._token
+        if self._token is not None and self._token.is_valid():
+            return self._token
+        # Token missing or expired: re-authenticate with the service-account password
+        # if one is configured; a bare user session with no password can't self-renew.
+        password = self.system.resolved_password()
+        if password:
+            self._token = await auth.login(self._client, self.system.username, password)
+            return self._token
+        raise auth.AuthError(
+            "No valid NX session and no service-account password configured. "
+            "Run `nxre login` to authenticate as your NX user."
+        )
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         token = await self._ensure_token()

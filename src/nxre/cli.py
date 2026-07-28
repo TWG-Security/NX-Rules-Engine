@@ -16,17 +16,23 @@ Network commands hit one NX site (``--system``, default from config).
 from __future__ import annotations
 
 import asyncio
+import sys
+import time
 
+import httpx
 import typer
 from rich.console import Console
 from rich.table import Table
 
+from .client import auth
+from .client.auth import Token
 from .client.nx_client import NxClient
-from .config import Settings, load_settings
+from .config import NxSystem, Settings, load_settings
 from .models.rule import NativeRule
 from .rules import apply as apply_mod
 from .rules import diff as diff_mod
 from .rules import repo, validate
+from .session import SessionStore
 
 app = typer.Typer(no_args_is_help=True, help="NX Rules Engine — rules-as-code for NX Witness.")
 rules_app = typer.Typer(no_args_is_help=True, help="Manage native NX event rules as code.")
@@ -43,6 +49,88 @@ def _system(settings: Settings, system: str | None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# authentication helpers
+# ---------------------------------------------------------------------------
+def _open_client(sys_cfg: NxSystem) -> NxClient:
+    """Build a client seeded with any cached user session token for this system."""
+    token = SessionStore().load(sys_cfg.name)
+    return NxClient(sys_cfg, token=token)
+
+
+def _has_usable_auth(sys_cfg: NxSystem) -> bool:
+    """True if we can talk to NX without prompting (live session or service pw)."""
+    token = SessionStore().load(sys_cfg.name)
+    if token is not None and token.is_valid():
+        return True
+    return bool(sys_cfg.resolved_password())
+
+
+def _interactive_login(sys_cfg: NxSystem, *, username: str | None = None) -> Token:
+    """Prompt for NX credentials, authenticate, cache the token, and return it.
+
+    Only the resulting bearer token is stored — the password is used once and dropped.
+    """
+    store = SessionStore()
+    default_user = username or store.username(sys_cfg.name)
+    # A meaningful config username is a fine default; the service placeholder isn't.
+    if not default_user and sys_cfg.username and sys_cfg.username != "nxre-service":
+        default_user = sys_cfg.username
+    user = username or typer.prompt("NX username", default=default_user or None)
+    password = typer.prompt(f"NX password for {user!r}", hide_input=True)
+
+    async def _run() -> Token:
+        async with httpx.AsyncClient(
+            base_url=sys_cfg.base_url.rstrip("/"),
+            verify=sys_cfg.verify_tls,
+            timeout=15.0,
+        ) as client:
+            return await auth.login(client, user, password)
+
+    token = asyncio.run(_run())
+    store.save(sys_cfg.name, token, user)
+    remaining = max(0, int(token.expires_at - time.time()))
+    console.print(
+        f"[green]Logged in[/] to [bold]{sys_cfg.name}[/] as [bold]{user}[/]. "
+        f"Session cached at {store.path} (valid ~{remaining // 60}m)."
+    )
+    return token
+
+
+@app.command("login")
+def login_cmd(
+    system: str = typer.Option(None, help="NX system name (default from config)."),
+    username: str = typer.Option(None, "--username", "-u", help="Skip the username prompt."),
+):
+    """Log in as your NX user; caches only the session token for later commands."""
+    settings = _settings()
+    sys_cfg = settings.system(_system(settings, system))
+    try:
+        _interactive_login(sys_cfg, username=username)
+    except auth.AuthError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(1) from None
+
+
+@app.command("logout")
+def logout_cmd(
+    system: str = typer.Option(None, help="System to log out of (default from config)."),
+    all_systems: bool = typer.Option(False, "--all", help="Clear every cached session."),
+):
+    """Discard cached session token(s)."""
+    store = SessionStore()
+    if all_systems:
+        removed = store.clear(None)
+        console.print("[green]Cleared all sessions.[/]" if removed else "No sessions to clear.")
+        return
+    settings = _settings()
+    sys_name = _system(settings, system)
+    removed = store.clear(sys_name)
+    console.print(
+        f"[green]Logged out of {sys_name}.[/]" if removed else f"No cached session for {sys_name}."
+    )
+
+
+# ---------------------------------------------------------------------------
 # rules pull
 # ---------------------------------------------------------------------------
 @rules_app.command("pull")
@@ -53,7 +141,7 @@ def rules_pull(system: str = typer.Option(None, help="NX system name (default fr
     sys_cfg = settings.system(sys_name)
 
     async def _run() -> int:
-        async with NxClient(sys_cfg) as client:
+        async with _open_client(sys_cfg) as client:
             return await repo.pull(client, settings, sys_name)
 
     count = asyncio.run(_run())
@@ -106,7 +194,7 @@ def _build_plan(settings: Settings, sys_name: str, prune: bool) -> diff_mod.Plan
     desired = repo.load_desired_rules(settings, sys_name)
 
     async def _live() -> list[NativeRule]:
-        async with NxClient(sys_cfg) as client:
+        async with _open_client(sys_cfg) as client:
             return [NativeRule.from_api(r) for r in await client.get_rules()]
 
     live = asyncio.run(_live())
@@ -167,7 +255,7 @@ def rules_apply(
         return
 
     async def _run() -> list[apply_mod.ApplyResult]:
-        async with NxClient(sys_cfg) as client:
+        async with _open_client(sys_cfg) as client:
             return await apply_mod.apply_plan(
                 client, plan, execute_guarded=apply, dry_run=dry_run
             )
@@ -271,10 +359,34 @@ def serve_cmd(
 
     settings = _settings()
     sys_name = _system(settings, system)
-    app_obj = create_app(settings, sys_name)
+    sys_cfg = settings.system(sys_name)
+
+    # The service reuses your `nxre login` session. If there's no usable credential
+    # yet, prompt now (before binding the port). Unattended restarts — systemd, Docker —
+    # have no TTY to prompt on, so they need either a still-valid cached token or a
+    # configured service-account password; otherwise we fail fast with guidance.
+    store = SessionStore()
+    if not _has_usable_auth(sys_cfg):
+        if sys.stdin.isatty():
+            try:
+                _interactive_login(sys_cfg)
+            except auth.AuthError as exc:
+                console.print(f"[red]{exc}[/]")
+                raise typer.Exit(1) from None
+        else:
+            console.print(
+                f"[red]No valid NX session for {sys_name!r} and no service-account "
+                f"password configured.[/] Run `nxre login` first, or set "
+                f"NXRE__{sys_name.upper()}__PASSWORD for unattended startup."
+            )
+            raise typer.Exit(1)
+
+    token = store.load(sys_name)
+    authed_user = store.username(sys_name) if token and token.is_valid() else sys_cfg.username
+    app_obj = create_app(settings, sys_name, authenticated_user=authed_user)
     console.print(
-        f"[green]nxre serving[/] for [bold]{sys_name}[/] — POST NX events to "
-        f"{settings.webhook.public_url}/webhook/nx"
+        f"[green]nxre serving[/] for [bold]{sys_name}[/] as [bold]{authed_user}[/] — "
+        f"POST NX events to {settings.webhook.public_url}/webhook/nx"
     )
     uvicorn.run(app_obj, host=host or settings.webhook.host, port=port or settings.webhook.port)
 

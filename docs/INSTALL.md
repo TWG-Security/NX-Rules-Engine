@@ -6,27 +6,37 @@ events on a webhook. Three install paths are supported.
 
 ---
 
-## 0. Prerequisites — a local NX service account
+## 0. Prerequisites — an NX account
 
 `nxre` authenticates with a **local** NX account (no Nx Cloud dependency; works offline).
-Create a dedicated account rather than reusing a person's login:
+You need an account with permission to read/write event rules (**Administrator**, or the
+minimum role your policy allows). Note the server URL, usually `https://<host>:7001`.
 
+There are two ways to authenticate — pick per how you run `nxre`:
+
+### A. Interactive login (recommended for people)
+Just use **your own NX user**. Create the config (no password in it), then log in:
+```bash
+cp nxre.config.example.yaml nxre.config.yaml
+$EDITOR nxre.config.yaml          # set base_url + writable per site; leave username blank
+nxre login                        # prompts for your NX username + password
+```
+`nxre login` authenticates and caches **only the bearer token** to `~/.nxre/session.json`
+(`0600`). Every later command — and `nxre serve` — reuses it until it expires, then asks
+again. Your password is never written to disk. `nxre logout` (or `--all`) clears it.
+Override the location with `NXRE_SESSION_FILE` if you want the token elsewhere.
+
+### B. Service account (for unattended systemd/Docker startup)
+A background service can't stop to prompt, so give it a dedicated login:
 1. In the NX Desktop client: **System Administration → Users → New User**.
-2. Type **Local**, name it e.g. `nxre-service`, give it a strong password.
-3. Grant it **Administrator** (needed to read/write event rules) or the minimum role your
-   policy allows for rule management.
-4. Note the server URL, usually `https://<host>:7001`.
-
-Then set the password as an environment variable (never in the YAML):
+2. Type **Local**, name it e.g. `nxre-service`, give it a strong password, grant the role.
+3. Put that name in the config's `username`, and pass the password via env (never in YAML):
 ```bash
 export NXRE__TWG__PASSWORD='the-password'      # NXRE__<SYSTEM_NAME_UPPER>__PASSWORD
 ```
 
-Create the config:
-```bash
-cp nxre.config.example.yaml nxre.config.yaml
-$EDITOR nxre.config.yaml          # set base_url, username, writable per site
-```
+A live login session always takes precedence; the service-account password is only used
+as a fallback when there's no valid cached token.
 
 ---
 
@@ -37,6 +47,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 pip install -e '.[dev]'           # editable install + test deps
 
+nxre login                        # authenticate as your NX user
 nxre rules pull                   # verify connectivity
 pytest                            # run the test suite
 ```
@@ -60,7 +71,9 @@ What it does:
 - installs `installer/nxre.service` to `/etc/systemd/system/nxre.service`
 - prints next steps
 
-Then provide config + secret and start it:
+Then provide config + credential and start it. A systemd-managed service restarts with
+no TTY, so it uses the **service-account** path (option B above) — set its password in the
+unit's environment:
 ```bash
 sudo cp nxre.config.yaml /opt/nxre/nxre.config.yaml
 sudoedit /etc/systemd/system/nxre.service      # set NXRE__<SYSTEM>__PASSWORD in [Service] Environment

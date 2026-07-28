@@ -31,8 +31,8 @@ git clone <this-repo> && cd NX-Rules-Engine
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e '.[dev]'
 
-cp nxre.config.example.yaml nxre.config.yaml   # then edit hosts/users
-export NXRE__TWG__PASSWORD='your-service-account-password'
+cp nxre.config.example.yaml nxre.config.yaml   # then edit hosts
+nxre login                 # log in as your own NX user (prompts; caches the token)
 nxre rules pull            # you're off
 ```
 
@@ -54,7 +54,9 @@ docker run -d --name nxre --network host \
 ## Configure
 
 Copy `nxre.config.example.yaml` → `nxre.config.yaml` (gitignored) and list your sites.
-**Never** commit passwords — set them via `NXRE__<SYSTEM>__PASSWORD` env vars.
+No passwords needed in the file — **just run `nxre login`** and authenticate as your
+own NX user. Only the bearer token is cached (`~/.nxre/session.json`, `0600`); the
+password is never written to disk. `nxre logout` clears it.
 
 ```yaml
 default_system: TWG
@@ -62,16 +64,23 @@ webhook: { public_url: http://127.0.0.1:8787 }
 systems:
   TWG:
     base_url: https://127.0.0.1:7001
-    username: nxre-service
+    username: ""          # blank → log in interactively as yourself
     verify_tls: false     # NX ships a self-signed cert
     writable: true        # only writable systems accept ANY write
 ```
+
+For **unattended** startup (systemd/Docker, no one to type a password), use a service
+account instead: set `username` to it and pass its password via the
+`NXRE__<SYSTEM>__PASSWORD` env var. A live login session always takes precedence; the
+service-account password is the fallback when there's no valid cached token.
 
 ---
 
 ## Usage
 
 ```bash
+nxre login                      # authenticate as your NX user (caches the token)
+nxre logout [--all]             # discard the cached session token(s)
 nxre rules pull                 # live rules -> rules/<system>/*.yaml (secrets redacted)
 nxre rules list                 # table of local desired rules
 nxre rules show <id>            # one rule

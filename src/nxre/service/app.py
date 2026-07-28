@@ -42,7 +42,12 @@ def load_automations(settings: Settings, system: str) -> list[Automation]:
     return automations
 
 
-def create_app(settings: Settings, system: str | None = None) -> FastAPI:
+def create_app(
+    settings: Settings,
+    system: str | None = None,
+    *,
+    authenticated_user: str | None = None,
+) -> FastAPI:
     system = system or settings.default_system
     app = FastAPI(title="nxre", version="0.1.0")
 
@@ -54,12 +59,14 @@ def create_app(settings: Settings, system: str | None = None) -> FastAPI:
     app.state.bus = bus
     app.state.engine = engine
     app.state.system = system
+    app.state.authenticated_user = authenticated_user
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
         return {
             "status": "ok",
             "system": system,
+            "authenticated_user": authenticated_user,
             "automations": len(automations),
             "events_seen": len(bus.recent),
         }
