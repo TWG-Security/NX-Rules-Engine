@@ -56,6 +56,8 @@ class Automation(BaseModel):
     description: str = ""
     enabled: bool = True
     mode: Literal["single", "restart", "queued", "parallel"] = "single"
+    # How multiple conditions combine: "all" (AND) or "any" (OR).
+    condition_match: Literal["all", "any"] = "all"
     trigger: list[Trigger] = Field(default_factory=list)
     condition: list[Condition] = Field(default_factory=list)
     action: list[Action] = Field(default_factory=list)

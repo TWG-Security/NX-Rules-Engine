@@ -316,134 +316,196 @@ so events flow in.</div>
 
 
 # Self-contained builder script (plain string, NOT an f-string — avoids brace escaping).
+_FRIENDLY_EVENTS = {
+    "motion": "Motion is detected",
+    "deviceDisconnected": "A camera goes offline",
+    "cameraInput": "A camera input signal fires",
+    "analyticsSdkEvent": "An analytics event occurs",
+    "generic": "A generic / custom event arrives",
+    "softwareTrigger": "A soft trigger is pressed",
+    "networkIssue": "A network issue occurs",
+    "storageFailure": "A storage failure occurs",
+}
+
+
+def _friendly_event(t: str) -> str:
+    return _FRIENDLY_EVENTS.get(t, t)
+
+
+# Fully-visual builder — every input is a dropdown or simple field, no code anywhere.
+# Plain string (NOT an f-string) so JS braces need no escaping.
 _BUILDER_JS = r"""
+var EVENTS=[];      // [[value,label],...] event types
+var CAMERAS=[];     // [{id,name},...] devices
+var INITIAL={};
 function esc(v){return (v==null?'':String(v)).replace(/&/g,'&amp;').replace(/</g,'&lt;')
   .replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function h(s){var t=document.createElement('template');t.innerHTML=s.trim();return t.content.firstChild;}
-function wrap(inner){return '<div class="blk">'+inner+
-  '<button type="button" class="del" onclick="this.closest(\'.blk\').remove()">remove</button></div>';}
-function vis(sel, blk){var val=sel.value;
-  blk.querySelectorAll('[data-when]').forEach(function(d){
-    d.style.display = d.getAttribute('data-when').split(',').indexOf(val)>=0 ? '' : 'none';});}
-function mkSelect(el, field, pairs, current){
-  var sel=el.querySelector('select[data-f='+field+']');
-  pairs.forEach(function(p){var o=document.createElement('option');o.value=p[0];o.textContent=p[1];
-    if(p[0]===current)o.selected=true;sel.appendChild(o);});
-  return sel;}
+function rm(b){b.closest('.row').remove();}
+function val(r,f){var e=r.querySelector('[data-f='+f+']');return e?(e.value||'').trim():'';}
+function evOpts(sel){return '<option value="">— pick an event —</option>'+EVENTS.map(function(e){
+  return '<option value="'+esc(e[0])+'"'+(e[0]===sel?' selected':'')+'>'+esc(e[1])+'</option>';}).join('');}
+function camOpts(useId,sel){if(!CAMERAS.length)return '<option value="">(no cameras found)</option>';
+  return CAMERAS.map(function(c){var v=useId?c.id:c.name;
+  return '<option value="'+esc(v)+'"'+(v===sel?' selected':'')+'>'+esc(c.name)+'</option>';}).join('');}
 
 function addTrigger(d){d=d||{};
-  var el=h(wrap(
-    '<label>NX event type</label>'+
-    '<input data-f="event_type" list="evtypes" placeholder="e.g. motion" value="'+esc(d.event_type)+'">'+
-    '<label>From source contains (optional)</label><input data-f="source" value="'+esc(d.source)+'">'+
-    '<label>Caption contains (optional)</label><input data-f="caption" value="'+esc(d.caption)+'">'));
-  document.getElementById('triggers').appendChild(el);}
+  var r=h('<div class="row"><span class="lead">When</span>'+
+    '<select class="grow" data-f="event_type">'+evOpts(d.event_type)+'</select>'+
+    '<span class="lead">on</span>'+
+    '<select data-f="scope"><option value="any">any camera</option>'+
+      '<option value="one">a specific camera</option></select>'+
+    '<select class="grow" data-f="source" style="display:none">'+camOpts(false,d.source)+'</select>'+
+    '<button type="button" class="x" onclick="rm(this)">remove</button></div>');
+  var scope=r.querySelector('[data-f=scope]'), cam=r.querySelector('[data-f=source]');
+  function upd(){cam.style.display=scope.value==='one'?'':'none';}
+  scope.value=d.source?'one':'any'; upd(); scope.onchange=upd;
+  document.getElementById('triggers').appendChild(r);}
 
-function addCondition(d){d=d||{};
-  var el=h(wrap(
-    '<label>Condition</label><select data-f="condition"></select>'+
-    '<div data-when="caption_contains,source_contains,event_type_is,description_contains">'+
-    '<label>Value</label><input data-f="value" value="'+esc(d.value)+'"></div>'+
-    '<div data-when="time_between"><label>After (HH:MM)</label><input data-f="after" value="'+esc(d.after)+'">'+
-    '<label>Before (HH:MM)</label><input data-f="before" value="'+esc(d.before)+'"></div>'));
-  var sel=mkSelect(el,'condition',[['caption_contains','Caption contains'],
-    ['source_contains','Source contains'],['event_type_is','Event type is'],
-    ['description_contains','Description contains'],['time_between','Time of day between']],
-    d.condition||'caption_contains');
-  sel.onchange=function(){vis(sel,el);};
-  document.getElementById('conditions').appendChild(el); vis(sel,el);}
+function addCond(d){d=d||{};
+  var field='caption';
+  if(d.condition==='time_between')field='time';
+  else if(d.condition==='day_of_week')field='dow';
+  else if(d.condition==='source_contains')field='camera';
+  var r=h('<div class="row"><select data-f="field">'+
+    '<option value="time">Time of day is</option><option value="dow">Day of week is</option>'+
+    '<option value="camera">Camera is</option><option value="caption">Caption contains</option>'+
+    '</select><span class="body grow"></span>'+
+    '<button type="button" class="x" onclick="rm(this)">remove</button></div>');
+  var body=r.querySelector('.body'), fsel=r.querySelector('[data-f=field]');
+  function render(f){
+    if(f==='time')body.innerHTML='<span class="lead">between</span> '+
+      '<input type="time" data-f="after" value="'+esc(d.after||'22:00')+'"> <span class="lead">and</span> '+
+      '<input type="time" data-f="before" value="'+esc(d.before||'06:00')+'">';
+    else if(f==='dow'){var ds=(d.days||'').toLowerCase();
+      body.innerHTML='<span class="lead">is</span> '+['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(function(x){
+      return '<label style="font-size:12px;margin-right:7px"><input type="checkbox" class="dow" value="'+
+        x.toLowerCase()+'"'+(ds.indexOf(x.toLowerCase())>=0?' checked':'')+'> '+x+'</label>';}).join('');}
+    else if(f==='camera')body.innerHTML='<span class="lead">is</span> '+
+      '<select class="grow" data-f="camval">'+camOpts(false,d.value)+'</select>';
+    else body.innerHTML='<span class="lead">contains</span> '+
+      '<input type="text" class="grow" data-f="capval" value="'+esc(d.value)+'" placeholder="e.g. intrusion">';}
+  fsel.value=field; render(field); fsel.onchange=function(){render(fsel.value);};
+  document.getElementById('conds').appendChild(r);}
 
-function addAction(d){d=d||{};
-  var el=h(wrap(
-    '<label>Action</label><select data-f="kind"></select>'+
-    '<div data-when="log"><label>Message</label><input data-f="message" value="'+esc(d.message)+'"></div>'+
-    '<div data-when="http"><label>Method</label><select data-f="method"></select>'+
-    '<label>URL</label><input data-f="url" placeholder="https://..." value="'+esc(d.url)+'">'+
-    '<label>Body (optional)</label><textarea data-f="body">'+esc(d.body)+'</textarea></div>'+
-    '<div data-when="nx_generic_event"><label>Caption</label><input data-f="caption" value="'+esc(d.caption)+'">'+
-    '<label>Source</label><input data-f="source" value="'+esc(d.source)+'"></div>'+
-    '<div data-when="nx_soft_trigger"><label>Trigger ID</label><input data-f="trigger_id" value="'+esc(d.trigger_id)+'"></div>'));
-  var sel=mkSelect(el,'kind',[['log','Write to log'],['http','Call a URL (webhook)'],
-    ['nx_generic_event','Raise NX generic event'],['nx_soft_trigger','Fire NX soft trigger']],
-    d.kind||'log');
-  mkSelect(el,'method',[['POST','POST'],['GET','GET'],['PUT','PUT']], d.method||'POST');
-  sel.onchange=function(){vis(sel,el);};
-  document.getElementById('actions').appendChild(el); vis(sel,el);}
+function addAct(d){d=d||{};
+  var r=h('<div class="row"><span class="lead">Do</span><select data-f="kind">'+
+    '<option value="nx_generic_event">Send an NX notification</option>'+
+    '<option value="http">Call a webhook / URL</option>'+
+    '<option value="nx_device_output">Trigger a camera output (relay)</option>'+
+    '<option value="nx_bookmark">Bookmark the moment on a camera</option>'+
+    '<option value="nx_soft_trigger">Fire an NX soft trigger</option>'+
+    '<option value="log">Write to the log</option></select>'+
+    '<span class="body grow"></span>'+
+    '<button type="button" class="x" onclick="rm(this)">remove</button></div>');
+  var body=r.querySelector('.body'), ksel=r.querySelector('[data-f=kind]');
+  function render(k){
+    if(k==='nx_generic_event')body.innerHTML='<input type="text" class="grow" data-f="caption" value="'+
+      esc(d.caption)+'" placeholder="Notification text, e.g. Motion at {source}">';
+    else if(k==='http')body.innerHTML='<select data-f="method"><option'+(d.method!=='GET'?' selected':'')+
+      '>POST</option><option'+(d.method==='GET'?' selected':'')+'>GET</option></select> '+
+      '<input type="text" class="grow" data-f="url" value="'+esc(d.url)+'" placeholder="https://...">';
+    else if(k==='nx_device_output')body.innerHTML='<span class="lead">on</span> '+
+      '<select class="grow" data-f="device_id">'+camOpts(true,d.device_id)+'</select>';
+    else if(k==='nx_bookmark')body.innerHTML='<span class="lead">on</span> '+
+      '<select class="grow" data-f="device_id">'+camOpts(true,d.device_id)+'</select> '+
+      '<input type="text" data-f="bname" value="'+esc(d.name)+'" placeholder="bookmark name">';
+    else if(k==='nx_soft_trigger')body.innerHTML='<input type="text" class="grow" data-f="trigger_id" value="'+
+      esc(d.trigger_id)+'" placeholder="soft trigger id">';
+    else body.innerHTML='<input type="text" class="grow" data-f="message" value="'+
+      esc(d.message)+'" placeholder="log message">';}
+  ksel.value=d.kind||'nx_generic_event'; render(ksel.value); ksel.onchange=function(){render(ksel.value);};
+  document.getElementById('acts').appendChild(r);}
 
-function coll(id){
-  return [].map.call(document.getElementById(id).querySelectorAll('.blk'), function(b){
-    var o={};
-    b.querySelectorAll('[data-f]').forEach(function(inp){
-      var grp=inp.closest('[data-when]'); if(grp && grp.style.display==='none') return;
-      var v=(inp.value||'').trim(); if(v!=='') o[inp.getAttribute('data-f')]=v;});
-    return o;});}
+function kids(id){return [].slice.call(document.getElementById(id).children);}
+function collTriggers(){return kids('triggers').map(function(r){
+  var o={platform:'nx_event',event_type:val(r,'event_type')};
+  if(r.querySelector('[data-f=scope]').value==='one'){var s=val(r,'source');if(s)o.source=s;}
+  return o;}).filter(function(o){return o.event_type;});}
+function collConds(){return kids('conds').map(function(r){
+  var f=r.querySelector('[data-f=field]').value;
+  if(f==='time')return {condition:'time_between',after:val(r,'after'),before:val(r,'before')};
+  if(f==='dow')return {condition:'day_of_week',days:[].filter.call(r.querySelectorAll('.dow'),
+    function(c){return c.checked;}).map(function(c){return c.value;}).join(',')};
+  if(f==='camera')return {condition:'source_contains',value:val(r,'camval')};
+  return {condition:'caption_contains',value:val(r,'capval')};});}
+function collActs(){return kids('acts').map(function(r){
+  var k=r.querySelector('[data-f=kind]').value,o={kind:k};
+  if(k==='nx_generic_event')o.caption=val(r,'caption');
+  else if(k==='http'){o.method=val(r,'method');o.url=val(r,'url');}
+  else if(k==='nx_device_output')o.device_id=val(r,'device_id');
+  else if(k==='nx_bookmark'){o.device_id=val(r,'device_id');o.name=val(r,'bname');}
+  else if(k==='nx_soft_trigger')o.trigger_id=val(r,'trigger_id');
+  else o.message=val(r,'message');
+  return o;});}
 
 function serialize(){
-  var triggers=coll('triggers').map(function(t){t.platform='nx_event';return t;});
   var alias=document.getElementById('alias').value.trim();
   if(!alias){alert('Give the automation a name.');return false;}
-  if(triggers.length===0){alert('Add at least one trigger (the "When").');return false;}
-  var actions=coll('actions');
-  if(actions.length===0){alert('Add at least one action (the "Then do").');return false;}
-  var payload={id:(INITIAL.id||null), alias:alias,
-    enabled:document.getElementById('enabled').checked,
-    mode:document.getElementById('mode').value,
-    trigger:triggers, condition:coll('conditions'), action:actions};
+  var triggers=collTriggers();
+  if(!triggers.length){alert('Add at least one trigger (the “When”) and pick its event.');return false;}
+  var acts=collActs();
+  if(!acts.length){alert('Add at least one action (the “Then do”).');return false;}
+  var payload={id:INITIAL.id||null, alias:alias,
+    enabled:document.getElementById('enabled').checked, mode:'single',
+    condition_match:document.getElementById('match').value,
+    trigger:triggers, condition:collConds(), action:acts};
   document.getElementById('payload').value=JSON.stringify(payload);
   return true;}
 
-var INITIAL={};
 function boot(){
   if(INITIAL && (INITIAL.trigger||INITIAL.action)){
     document.getElementById('alias').value=INITIAL.alias||'';
     document.getElementById('enabled').checked=INITIAL.enabled!==false;
-    document.getElementById('mode').value=INITIAL.mode||'single';
+    document.getElementById('match').value=(INITIAL.condition_match==='any')?'any':'all';
     (INITIAL.trigger||[]).forEach(addTrigger);
-    (INITIAL.condition||[]).forEach(addCondition);
-    (INITIAL.action||[]).forEach(addAction);
-  } else { addTrigger(); addAction(); }
+    (INITIAL.condition||[]).forEach(addCond);
+    (INITIAL.action||[]).forEach(addAct);
+  } else { addTrigger(); addAct(); }
 }
 """
 
 
 def _automation_builder_page(
-    system: str, initial: dict, action_url: str, is_edit: bool, error: str = "",
+    system: str, initial: dict, action_url: str, is_edit: bool,
+    events: list, cameras: list, error: str = "",
 ) -> str:
     err = f'<div class="err">{html.escape(error)}</div>' if error else ""
-    datalist = "".join(f'<option value="{html.escape(e)}">' for e in _COMMON_EVENTS)
-    modes = "".join(
-        f'<option value="{m}">{m}</option>' for m in ("single", "restart", "queued", "parallel")
-    )
     head = f"""
 <div class="topbar">
   <h1 style="margin:0">{"Edit automation" if is_edit else "New automation"}</h1>
   <a class="link" href="/automations">&larr; Automations</a>
 </div>
+<p class="muted">Build it by picking from menus — no code anywhere. Stack as many layers as you like.</p>
 {err}
-<datalist id="evtypes">{datalist}</datalist>
 <form method="post" action="{action_url}" onsubmit="return serialize()">
   <input type="hidden" name="payload" id="payload">
   <label for="alias">Name</label>
-  <input id="alias" type="text" placeholder="e.g. Alert on lobby camera offline">
+  <input id="alias" type="text" placeholder="e.g. After-hours motion at the loading dock">
   <div class="check"><input id="enabled" type="checkbox" checked>
     <label for="enabled" style="margin:0">Enabled</label></div>
-  <label for="mode">Run mode</label><select id="mode">{modes}</select>
 
-  <h2>When <span class="small">— a trigger starts the automation</span></h2>
+  <h2>When <span class="small">— the event that starts it (any of these)</span></h2>
   <div id="triggers"></div>
   <button type="button" class="ghost" onclick="addTrigger()">+ Add trigger</button>
 
-  <h2>And if <span class="small">(optional) — all conditions must pass</span></h2>
-  <div id="conditions"></div>
-  <button type="button" class="ghost" onclick="addCondition()">+ Add condition</button>
+  <h2>And if <span class="small">(optional)</span></h2>
+  <p class="small" style="margin:2px 0 6px">Match
+    <select id="match" style="width:auto;display:inline-block;padding:4px 8px">
+      <option value="all">all (AND)</option><option value="any">any (OR)</option>
+    </select> of these — your “if this and this and this”.</p>
+  <div id="conds"></div>
+  <button type="button" class="ghost" onclick="addCond()">+ Add condition</button>
 
-  <h2>Then do <span class="small">— actions run in order</span></h2>
-  <div id="actions"></div>
-  <button type="button" class="ghost" onclick="addAction()">+ Add action</button>
+  <h2>Then do <span class="small">— actions run top to bottom</span></h2>
+  <div id="acts"></div>
+  <button type="button" class="ghost" onclick="addAct()">+ Add action</button>
 
   <button class="block" type="submit">{"Save changes" if is_edit else "Create automation"}</button>
 </form>
 <script>{_BUILDER_JS}
+EVENTS = {json.dumps(events)};
+CAMERAS = {json.dumps(cameras)};
 INITIAL = {json.dumps(initial)};
 boot();
 </script>"""
@@ -716,12 +778,36 @@ def create_app(settings: Settings, system: str | None = None) -> FastAPI:
         mode = data.get("mode", "single")
         if mode not in ("single", "restart", "queued", "parallel"):
             mode = "single"
+        match = data.get("condition_match")
         return Automation(
             id=(data.get("id") or None),
             alias=(data.get("alias") or "").strip() or "unnamed automation",
             enabled=bool(data.get("enabled", True)), mode=mode,
+            condition_match=(match if match in ("all", "any") else "all"),
             trigger=triggers, condition=conds, action=acts,
         )
+
+    async def _builder_data() -> tuple[list, list]:
+        """Live event types + cameras for the builder dropdowns (fallbacks if offline)."""
+        events = [[e, _friendly_event(e)] for e in _COMMON_EVENTS]
+        cameras: list[dict] = []
+        client = _client()
+        if client is not None:
+            async with client:
+                try:
+                    types = (await Manifest.fetch(client)).event_types()
+                    if types:
+                        events = [[e, _friendly_event(e)] for e in types]
+                except (NxApiError, httpx.HTTPError, ValueError, TypeError):
+                    pass
+                try:
+                    cameras = [
+                        {"id": d.get("id", ""), "name": d.get("name") or d.get("id", "")}
+                        for d in await client.get_devices() if d.get("id")
+                    ]
+                except (NxApiError, httpx.HTTPError, ValueError, TypeError):
+                    pass
+        return events, cameras
 
     @app.get("/automations", response_class=HTMLResponse)
     async def automations_index(notice: str = "", error: str = ""):
@@ -735,7 +821,10 @@ def create_app(settings: Settings, system: str | None = None) -> FastAPI:
     async def automations_new():
         if _valid_token() is None:
             return RedirectResponse("/", status_code=303)
-        return HTMLResponse(_automation_builder_page(system, {}, "/automations/save", is_edit=False))
+        events, cameras = await _builder_data()
+        return HTMLResponse(
+            _automation_builder_page(system, {}, "/automations/save", False, events, cameras)
+        )
 
     @app.get("/automations/{auto_id}/edit", response_class=HTMLResponse)
     async def automations_edit(auto_id: str):
@@ -744,8 +833,9 @@ def create_app(settings: Settings, system: str | None = None) -> FastAPI:
         auto = autos.get(settings, system, auto_id)
         if auto is None:
             return RedirectResponse("/automations?error=Automation+not+found", status_code=303)
+        events, cameras = await _builder_data()
         return HTMLResponse(_automation_builder_page(
-            system, auto.model_dump(exclude_none=True), "/automations/save", is_edit=True))
+            system, auto.model_dump(exclude_none=True), "/automations/save", True, events, cameras))
 
     @app.post("/automations/save")
     async def automations_save(request: Request):
@@ -762,8 +852,10 @@ def create_app(settings: Settings, system: str | None = None) -> FastAPI:
             if not auto.trigger or not auto.action:
                 raise ValueError("Add at least one trigger and one action.")
         except (ValidationError, ValueError) as exc:
+            events, cameras = await _builder_data()
             return HTMLResponse(
-                _automation_builder_page(system, data, "/automations/save", is_edit, error=str(exc)),
+                _automation_builder_page(
+                    system, data, "/automations/save", is_edit, events, cameras, error=str(exc)),
                 status_code=400,
             )
         autos.save(settings, system, auto)

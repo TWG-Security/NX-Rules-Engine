@@ -57,6 +57,19 @@ def _login(client):
     client.post("/login", data={"username": "admin", "password": "pw"})
 
 
+def _mock_builder_data():
+    """The builder pages pull event types + cameras live from NX."""
+    respx.get(f"{BASE}/rest/v4/events/manifest/events").mock(
+        return_value=httpx.Response(200, json={"result": {"motion": {}, "deviceDisconnected": {}}})
+    )
+    respx.get(f"{BASE}/rest/v4/events/manifest/actions").mock(
+        return_value=httpx.Response(200, json={"result": {}})
+    )
+    respx.get(f"{BASE}/rest/v4/devices").mock(return_value=httpx.Response(200, json={"result": [
+        {"id": "cam-1", "name": "Lobby Cam"}, {"id": "cam-2", "name": "Front Door"},
+    ]}))
+
+
 def test_automations_requires_login(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     assert client.get("/automations").status_code == 303
@@ -66,10 +79,14 @@ def test_automations_requires_login(tmp_path, monkeypatch):
 def test_builder_page_renders_sections(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     _login(client)
+    _mock_builder_data()
     resp = client.get("/automations/new")
     assert resp.status_code == 200
     for label in ("When", "And if", "Then do", "Add trigger", "Add action"):
         assert label in resp.text
+    # Live cameras + friendly event labels are injected for the dropdowns.
+    assert "Lobby Cam" in resp.text
+    assert "Motion is detected" in resp.text
 
 
 @respx.mock
@@ -100,6 +117,7 @@ def test_save_creates_automation_and_lists_it(tmp_path, monkeypatch):
 def test_save_rejects_missing_trigger(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     _login(client)
+    _mock_builder_data()  # error path re-renders the builder, which needs live data
     payload = {"alias": "no trigger", "trigger": [],
                "action": [{"kind": "log"}]}
     resp = client.post("/automations/save", data={"payload": json.dumps(payload)})
@@ -117,6 +135,7 @@ def test_edit_prefills_and_toggle_delete(tmp_path, monkeypatch):
     }))
     client = _client(tmp_path, monkeypatch)
     _login(client)
+    _mock_builder_data()
 
     edit = client.get("/automations/keep-me/edit")
     assert edit.status_code == 200

@@ -62,5 +62,30 @@ def register_nx_actions_factory(
         async with _client() as client:
             return await client.fire_soft_trigger({"triggerId": config["trigger_id"]})
 
+    async def nx_bookmark(config: dict[str, Any], event: Event, ctx: dict[str, Any]) -> Any:
+        device_id = config.get("device_id") or config.get("camera")
+        if not device_id:
+            raise ValueError("bookmark action needs a camera")
+        body = {
+            "name": config.get("name") or event.caption or "nxre bookmark",
+            "description": config.get("description", event.description),
+            "durationMs": int(config.get("duration_ms") or 5000),
+        }
+        async with _client() as client:
+            return await client.create_bookmark(str(device_id), body)
+
+    async def nx_device_output(config: dict[str, Any], event: Event, ctx: dict[str, Any]) -> Any:
+        device_id = config.get("device_id") or config.get("camera")
+        if not device_id:
+            raise ValueError("output action needs a camera/device")
+        port = str(config.get("port", ""))
+        port_cmd: dict[str, Any] = {"isActive": True}
+        if config.get("auto_reset_ms"):
+            port_cmd["autoResetTimeoutMs"] = int(config["auto_reset_ms"])
+        async with _client() as client:
+            return await client.set_device_io(str(device_id), {port: port_cmd})
+
     registry.register("nx_generic_event", nx_generic_event)
     registry.register("nx_soft_trigger", nx_soft_trigger)
+    registry.register("nx_bookmark", nx_bookmark)
+    registry.register("nx_device_output", nx_device_output)

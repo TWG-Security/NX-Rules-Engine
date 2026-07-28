@@ -58,11 +58,31 @@ def evaluate_one(cond: Condition, event: Event, now: time | None = None) -> bool
         # the server's local time, not UTC.
         now = now or datetime.now().time()  # noqa: DTZ005
         return _time_between(now, _parse_hhmm(data.get("after")), _parse_hhmm(data.get("before")))
+    if kind in ("day_of_week", "dow"):
+        days = data.get("days", data.get("value", ""))
+        if isinstance(days, list):
+            days = ",".join(days)
+        wanted = {d.strip().lower()[:3] for d in str(days).split(",") if d.strip()}
+        today = datetime.now().strftime("%a").lower()  # noqa: DTZ005 — local day is intended
+        return not wanted or today in wanted
 
     log.warning("unknown condition kind %r — treating as satisfied", kind)
     return True
 
 
+def evaluate(
+    conditions: list[Condition], event: Event, match: str = "all", now: time | None = None
+) -> bool:
+    """True if the conditions pass under ``match`` ('all' → AND, 'any' → OR).
+
+    An empty condition list always passes.
+    """
+    if not conditions:
+        return True
+    results = [evaluate_one(c, event, now) for c in conditions]
+    return any(results) if str(match).lower().startswith("any") else all(results)
+
+
 def evaluate_all(conditions: list[Condition], event: Event, now: time | None = None) -> bool:
-    """True if every condition passes (an empty list passes)."""
-    return all(evaluate_one(c, event, now) for c in conditions)
+    """Back-compat: all conditions must pass (AND)."""
+    return evaluate(conditions, event, "all", now)
