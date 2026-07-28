@@ -1,0 +1,33 @@
+# nxre configuration — copy to `nxre.config.yaml` (gitignored) and fill in.
+#
+# Passwords should NOT live here in production. Prefer environment variables:
+#   NXRE__<SYSTEM_NAME>__PASSWORD   (double underscore, system name upper-cased)
+# e.g.  export NXRE__TWG__PASSWORD='...'
+# A password set in env always overrides one written below.
+
+default_system: TWG
+
+# Where the companion service listens for NX "Do HTTP Request" pushes, and the
+# URL NX should call back (reachable from the NX server — usually localhost).
+webhook:
+  host: 0.0.0.0
+  port: 8787
+  public_url: http://127.0.0.1:8787   # what the provisioned NX rule will call
+
+rules_dir: rules
+automations_dir: automations
+secrets_file: secrets.local.yaml
+
+systems:
+  TWG:
+    base_url: https://127.0.0.1:7001
+    username: nxre-service
+    password: ""            # prefer NXRE__TWG__PASSWORD env var
+    verify_tls: false       # NX ships a self-signed cert by default
+    writable: true          # only writable systems accept writes at all
+
+  Bethel_Church:
+    base_url: https://bethel.example.lan:7001
+    username: nxre-service
+    verify_tls: false
+    writable: false         # customer site — read-only unless explicitly flipped

@@ -1,0 +1,24 @@
+# Example Home Assistant-style automation (Phase 1 parses + logs matches; Phase 2 runs
+# conditions + actions). Drop files like this under automations/<system>/.
+#
+# This one: when a Generic Event whose caption mentions "Intrusion" arrives from any
+# camera, raise a follow-up NX Generic Event tagged for nxre. In Phase 2 you'd instead
+# open a ConnectWise ticket, notify a tech, etc.
+
+alias: Intrusion → nxre generic event
+description: Demonstrates the trigger/condition/action format.
+enabled: true
+mode: single
+
+trigger:
+  - platform: nx_event
+    event_type: generic
+    caption: intrusion        # substring match on the event caption
+
+condition: []                 # e.g. a time window; not yet evaluated in Phase 1
+
+action:
+  - kind: nx_generic_event
+    source: nxre
+    caption: "Intrusion acknowledged by nxre"
+    description: "Follow-up raised automatically"
