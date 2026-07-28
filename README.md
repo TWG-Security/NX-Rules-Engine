@@ -40,7 +40,9 @@ nxre rules pull            # you're off
 ```bash
 sudo installer/install.sh          # installs, assumes NX at 127.0.0.1:7001, starts the service
 ```
-Then open **http://127.0.0.1:8787** in a browser and sign in with your NX account. That's it.
+Then open **http://127.0.0.1:8787** in a browser, sign in with your NX account, and
+**manage rules right in the page** — list, create, edit, enable/disable, delete. That's it.
+Re-running the installer after `git pull` updates in place (clean venv rebuild + restart).
 
 ### Docker
 ```bash
