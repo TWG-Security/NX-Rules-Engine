@@ -38,6 +38,15 @@ def trigger_matches(trigger: Trigger, event: Event) -> bool:
         elif key == "description":
             if want_s not in event.description.lower():
                 return False
+        elif key in ("object_type", "objecttype") and want_s not in ("", "any"):
+            # Analytics-object events carry the detected type in the caption/description and,
+            # if the webhook forwarded it, in raw["objectTypeId"] (e.g. "nx.base.Person").
+            # "any"/blank means don't filter. Substring match, like the other text fields.
+            hay = " ".join([
+                event.caption, event.description, str(event.raw.get("objectTypeId", "")),
+            ]).lower()
+            if want_s not in hay:
+                return False
     return True
 
 
