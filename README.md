@@ -36,27 +36,35 @@ nxre login                 # log in as your own NX user (prompts; caches the tok
 nxre rules pull            # you're off
 ```
 
-### On the NX server (systemd)
+### On the NX server (systemd) — the "boom done" path
 ```bash
-sudo installer/install.sh          # installs into /opt/nxre, creates the nxre service
-sudo systemctl enable --now nxre
+sudo installer/install.sh          # installs, assumes NX at 127.0.0.1:7001, starts the service
 ```
+Then open **http://127.0.0.1:8787** in a browser and sign in with your NX account. That's it.
 
 ### Docker
 ```bash
 docker build -t nxre -f installer/Dockerfile .
-docker run -d --name nxre --network host \
-  -e NXRE__TWG__PASSWORD=... -v $PWD/nxre.config.yaml:/app/nxre.config.yaml nxre
+docker run -d --name nxre --network host nxre
+# open http://127.0.0.1:8787 and log in
 ```
 
 ---
 
 ## Configure
 
-Copy `nxre.config.example.yaml` → `nxre.config.yaml` (gitignored) and list your sites.
-No passwords needed in the file — **just run `nxre login`** and authenticate as your
-own NX user. Only the bearer token is cached (`~/.nxre/session.json`, `0600`); the
-password is never written to disk. `nxre logout` clears it.
+There's nothing to configure for the common case: on the NX box, `installer/install.sh`
+drops a default config that assumes the mediaserver is at `https://127.0.0.1:7001`, and
+you log in from the **web page** (`http://127.0.0.1:8787`) with your NX account.
+
+Two ways to log in, both take your NX username/password and cache **only** the bearer
+token (`~/.nxre/session.json`, `0600` — the service uses `/opt/nxre/session.json`); the
+password is never written to disk:
+- **Web** — open the service page and sign in. Best for the `serve` companion.
+- **CLI** — `nxre login` (prompts), for the `rules` commands. `nxre logout` clears it.
+
+To point at a different host or add more sites, copy `nxre.config.example.yaml` →
+`nxre.config.yaml` (gitignored) and edit:
 
 ```yaml
 default_system: TWG
@@ -79,7 +87,8 @@ service-account password is the fallback when there's no valid cached token.
 ## Usage
 
 ```bash
-nxre login                      # authenticate as your NX user (caches the token)
+nxre serve                      # companion service + web login at http://127.0.0.1:8787
+nxre login                      # (CLI alternative) authenticate as your NX user
 nxre logout [--all]             # discard the cached session token(s)
 nxre rules pull                 # live rules -> rules/<system>/*.yaml (secrets redacted)
 nxre rules list                 # table of local desired rules
@@ -91,7 +100,6 @@ nxre rules new --action writeToLog   # scaffold a safe demo rule
 nxre rules new --webhook             # scaffold the event-ingestion webhook rule
 nxre rules enable <id> / disable <id>
 nxre validate                   # check rules against the cached manifest
-nxre serve                      # run the companion service (webhook + inspection API)
 ```
 
 ### Safe-write policy

@@ -68,23 +68,33 @@ sudo installer/install.sh
 What it does:
 - creates `/opt/nxre` and a venv at `/opt/nxre/.venv`
 - `pip install .` into that venv
+- drops a default `nxre.config.yaml` (assumes NX at `https://127.0.0.1:7001`)
 - installs `installer/nxre.service` to `/etc/systemd/system/nxre.service`
-- prints next steps
+- **enables and starts the service**
 
-Then provide config + credential and start it. A systemd-managed service restarts with
-no TTY, so it uses the **service-account** path (option B above) — set its password in the
-unit's environment:
-```bash
-sudo cp nxre.config.yaml /opt/nxre/nxre.config.yaml
-sudoedit /etc/systemd/system/nxre.service      # set NXRE__<SYSTEM>__PASSWORD in [Service] Environment
-sudo systemctl daemon-reload
-sudo systemctl enable --now nxre
-systemctl status nxre
-journalctl -u nxre -f                          # watch the live event log
+Then just open the web page and sign in:
+
+```
+http://127.0.0.1:8787      →  log in with your NX account  →  done
 ```
 
-The service runs `nxre serve` — the webhook receiver + inspection API on the port from
-your config (default `8787`).
+The login page authenticates against the local NX server, caches only the bearer token
+(`/opt/nxre/session.json`), and shows a status page. Useful commands:
+```bash
+systemctl status nxre
+journalctl -u nxre -f                          # watch the live event log
+sudo systemctl restart nxre                    # after editing /opt/nxre/nxre.config.yaml
+```
+
+If NX isn't on this box, edit `base_url` in `/opt/nxre/nxre.config.yaml` and restart.
+
+**Unattended restarts** (a reboot with nobody at a browser) can't log in interactively.
+If you need the service authenticated the instant it starts, set a service-account
+password in the unit — optional, and a live browser login always takes precedence:
+```bash
+sudoedit /etc/systemd/system/nxre.service      # Environment=NXRE__TWG__PASSWORD=...
+sudo systemctl daemon-reload && sudo systemctl restart nxre
+```
 
 ---
 
@@ -95,11 +105,15 @@ docker build -t nxre -f installer/Dockerfile .
 
 docker run -d --name nxre \
   --network host \
-  -e NXRE__TWG__PASSWORD='the-password' \
-  -v "$PWD/nxre.config.yaml:/app/nxre.config.yaml:ro" \
   -v "$PWD/rules:/app/rules" \
+  -v "$PWD/session.json:/app/session.json" \  # persist the login across restarts
   nxre
+# then open http://127.0.0.1:8787 and sign in with your NX account
 ```
+
+The image ships a default config assuming NX at `127.0.0.1:7001`; bind-mount your own
+`nxre.config.yaml` to `/app/nxre.config.yaml` to override. For unattended startup, pass
+`-e NXRE__TWG__PASSWORD=...` instead of logging in through the page.
 
 `--network host` lets the container reach `https://127.0.0.1:7001` and lets NX reach the
 webhook on `127.0.0.1:8787`. Adjust `public_url` in the config to match how NX addresses
