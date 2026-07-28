@@ -1,0 +1,41 @@
+# nxre configuration — copy to `nxre.config.yaml` (gitignored) and fill in.
+#
+# AUTH — two ways, pick per system:
+#   1. Interactive login (recommended for people). Run `nxre login`; it prompts for
+#      YOUR NX username + password, then caches only the bearer token to
+#      ~/.nxre/session.json (0600). Every later command and `nxre serve` reuse it
+#      until it expires. Leave `username`/`password` blank below for that system.
+#   2. Service account (for unattended systemd/Docker startup, which can't prompt).
+#      Set `username` to the service account and supply its password via env:
+#         NXRE__<SYSTEM_NAME>__PASSWORD   (double underscore, system name upper-cased)
+#      e.g.  export NXRE__TWG__PASSWORD='...'   (env always wins over a value here)
+#
+# A live login session takes precedence; the service-account password is the
+# fallback used only when there's no valid cached token.
+
+default_system: TWG
+
+# Where the companion service listens for NX "Do HTTP Request" pushes, and the
+# URL NX should call back (reachable from the NX server — usually localhost).
+webhook:
+  host: 0.0.0.0
+  port: 8787
+  public_url: http://127.0.0.1:8787   # what the provisioned NX rule will call
+
+rules_dir: rules
+automations_dir: automations
+secrets_file: secrets.local.yaml
+
+systems:
+  TWG:
+    base_url: https://127.0.0.1:7001
+    username: ""            # leave blank to log in as your own NX user (`nxre login`)
+    password: ""            # only for a service account; prefer NXRE__TWG__PASSWORD
+    verify_tls: false       # NX ships a self-signed cert by default
+    writable: true          # only writable systems accept writes at all
+
+  Bethel_Church:
+    base_url: https://bethel.example.lan:7001
+    username: ""            # `nxre login --system Bethel_Church` when you need it
+    verify_tls: false
+    writable: false         # customer site — read-only unless explicitly flipped

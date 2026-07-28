@@ -1,0 +1,25 @@
+[Unit]
+Description=nxre — NX Rules Engine companion service
+Documentation=https://github.com/twg-security/nx-rules-engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/nxre
+ExecStart=/opt/nxre/.venv/bin/nxre serve
+Restart=on-failure
+RestartSec=5
+
+# NX local service-account password — set this (do NOT put it in the YAML config).
+# Environment=NXRE__TWG__PASSWORD=change-me
+# Add one line per writable system, e.g. Environment=NXRE__MEDEVAC__PASSWORD=...
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
