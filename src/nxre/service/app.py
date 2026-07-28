@@ -38,7 +38,6 @@ from ..engine.bus import EventBus
 from ..engine.ingest.webhook import handle_payload
 from ..models.automation import Action, Automation, Condition, Trigger
 from ..models.rule import NativeRule
-from ..rules import repo
 from ..session import SessionStore
 
 log = logging.getLogger("nxre.service")
@@ -46,16 +45,6 @@ log = logging.getLogger("nxre.service")
 # TWG Security brand palette (fallback values; see TWGsecurity.com).
 _RED = "#C0392B"
 _CHARCOAL = "#1A1A1A"
-
-# Used only if the live manifest can't be fetched, so the dropdowns are never empty.
-_FALLBACK_EVENTS = [
-    "deviceDisconnected", "motion", "generic", "softwareTrigger",
-    "networkIssue", "storageFailure", "cameraInput",
-]
-_FALLBACK_ACTIONS = [
-    "writeToLog", "http", "bookmark", "showPopup", "sendEmail",
-    "playSound", "deviceOutput",
-]
 
 
 # ---------------------------------------------------------------------------
@@ -151,8 +140,12 @@ def _status_page(system: str, base_url: str, user: str, expires_in_min: int, eve
 <div class="row"><span class="k">Signed in as</span><span class="v">{html.escape(user)}</span></div>
 <div class="row"><span class="k">Session valid</span><span class="v">~{expires_in_min} min</span></div>
 <div class="row"><span class="k">Events received</span><span class="v">{events}</span></div>
-<a class="btn block" href="/automations">Automations (if&nbsp;this&nbsp;then&nbsp;that) &rarr;</a>
-<a class="btn ghost block" href="/rules">Native NX rules &rarr;</a>
+<a class="btn block" href="/rules">NX rules &rarr;</a>
+<p class="small" style="margin:6px 2px 0">Real NX event rules — they appear in NX and NX runs them
+(work even if this service is off).</p>
+<a class="btn ghost block" href="/automations">nxre automations (if&nbsp;this&nbsp;then&nbsp;that) &rarr;</a>
+<p class="small" style="margin:6px 2px 0">Cross-system logic run by <i>this service</i> — these do
+<b>not</b> appear in NX's own rule list.</p>
 <form class="logout" method="post" action="/logout">
   <button class="ghost block" type="submit">Sign out</button></form>"""
     return _page("Status — NX Rules Engine", body)
@@ -206,59 +199,140 @@ def _rules_page(
     return _page("Rules — NX Rules Engine", body, max_width=900)
 
 
-def _options(values: list[str], selected: str) -> str:
-    out = ['<option value=""></option>']
-    for v in values:
-        sel = " selected" if v == selected else ""
-        out.append(f'<option value="{html.escape(v)}"{sel}>{html.escape(v)}</option>')
-    return "".join(out)
+# Field names (from the NX manifest) that pick devices — rendered as camera multi-selects.
+_DEVICE_FIELD_NAMES = {
+    "deviceIds", "cameraIds", "eventResourceIds", "eventDeviceIds",
+    "deviceId", "targetDeviceId", "resourceIds",
+}
+
+# Manifest-driven native-rule builder. Every event/action type's fields come straight
+# from the live NX manifest, so the editor mirrors NX's own — analytics object type,
+# attributes, cameras, HTTP fields, etc. Plain string (JS braces need no escaping).
+_RULE_BUILDER_JS = r"""
+var EVENTS=[];    // [{id,displayName,fields:[{type,fieldName,displayName}]},...]
+var ACTIONS=[];
+var CAMERAS=[];   // [{id,name},...]
+var DEVICE_FIELDS=[];
+var INITIAL={};   // {comment,enabled,event:{type,...},action:{type,...}}
+function esc(v){return (v==null?'':String(v)).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+  .replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function isDeviceField(fn){return DEVICE_FIELDS.indexOf(fn)>=0;}
+function byId(list,id){for(var i=0;i<list.length;i++)if(list[i].id===id)return list[i];return null;}
+
+function typeOptions(list,sel){return '<option value="">— choose —</option>'+list.map(function(t){
+  return '<option value="'+esc(t.id)+'"'+(t.id===sel?' selected':'')+'>'+esc(t.displayName)+'</option>';
+}).join('');}
+
+// Render the fields for a chosen type into `container`, prefilling from `data`.
+function renderFields(container, typeObj, data){
+  container.innerHTML='';
+  if(!typeObj) return;
+  typeObj.fields.forEach(function(f){
+    var wrap=document.createElement('div'); wrap.className='fld';
+    var cur=data?data[f.fieldName]:undefined;
+    var label='<label>'+esc(f.displayName)+'</label>';
+    if(isDeviceField(f.fieldName)){
+      var multi=(f.fieldName.slice(-1)==='s');  // plural → multi-select
+      var sel=Array.isArray(cur)?cur:(cur?[cur]:[]);
+      var opts=CAMERAS.map(function(c){return '<option value="'+esc(c.id)+'"'+
+        (sel.indexOf(c.id)>=0?' selected':'')+'>'+esc(c.name)+'</option>';}).join('');
+      wrap.innerHTML=label+'<select data-fn="'+esc(f.fieldName)+'" data-kind="device"'+
+        (multi?' multiple size="4"':'')+'>'+(multi?'':'<option value=""></option>')+opts+'</select>';
+    } else {
+      var v=(cur==null)?'':(typeof cur==='object'?JSON.stringify(cur):cur);
+      wrap.innerHTML=label+'<input type="text" data-fn="'+esc(f.fieldName)+'" data-kind="text" value="'+
+        esc(v)+'" placeholder="'+esc(f.displayName)+'">';
+    }
+    container.appendChild(wrap);
+  });
+  if(!typeObj.fields.length) container.innerHTML='<p class="small">No extra fields for this type.</p>';
+}
+
+function collectFields(container){
+  var o={};
+  [].forEach.call(container.querySelectorAll('[data-fn]'),function(el){
+    var fn=el.getAttribute('data-fn');
+    if(el.getAttribute('data-kind')==='device'){
+      if(el.multiple){var ids=[].filter.call(el.options,function(o){return o.selected;})
+        .map(function(o){return o.value;}); if(ids.length)o[fn]=ids;}
+      else if(el.value)o[fn]=el.value;
+    } else { var v=(el.value||'').trim(); if(v!=='')o[fn]=v; }
+  });
+  return o;
+}
+
+function onEventType(){var t=byId(EVENTS,document.getElementById('etype').value);
+  renderFields(document.getElementById('efields'), t, (INITIAL.event||{}));}
+function onActionType(){var t=byId(ACTIONS,document.getElementById('atype').value);
+  renderFields(document.getElementById('afields'), t, (INITIAL.action||{}));}
+
+function serialize(){
+  var etype=document.getElementById('etype').value;
+  var atype=document.getElementById('atype').value;
+  if(!etype){alert('Pick an event (the “When”).');return false;}
+  if(!atype){alert('Pick an action (the “Do”).');return false;}
+  var event=collectFields(document.getElementById('efields')); event.type=etype;
+  var action=collectFields(document.getElementById('afields')); action.type=atype;
+  var payload={comment:document.getElementById('c').value.trim(),
+    enabled:document.getElementById('en').checked, event:event, action:action};
+  document.getElementById('payload').value=JSON.stringify(payload);
+  return true;
+}
+
+function boot(){
+  document.getElementById('etype').innerHTML=typeOptions(EVENTS,(INITIAL.event||{}).type||'');
+  document.getElementById('atype').innerHTML=typeOptions(ACTIONS,(INITIAL.action||{}).type||'');
+  document.getElementById('etype').onchange=onEventType;
+  document.getElementById('atype').onchange=onActionType;
+  document.getElementById('c').value=INITIAL.comment||'';
+  document.getElementById('en').checked=INITIAL.enabled!==false;
+  onEventType(); onActionType();
+}
+"""
 
 
-def _rule_form_page(
-    system: str, mode: str, event_types: list[str], action_types: list[str],
-    comment: str, enabled: bool, event_json: str, action_json: str,
-    event_type: str = "", action_type: str = "", rule_id: str | None = None,
-    error: str = "",
+def _rule_builder_page(
+    system: str, is_edit: bool, action_url: str, events: list, actions: list, cameras: list,
+    initial: dict, error: str = "",
 ) -> str:
-    is_edit = mode == "edit"
-    action = f"/rules/{html.escape(rule_id)}/update" if is_edit else "/rules/create"
-    title = "Edit rule" if is_edit else "New rule"
-    checked = " checked" if enabled else ""
+    title = "Edit NX rule" if is_edit else "New NX rule"
     err = f'<div class="err">{html.escape(error)}</div>' if error else ""
-    templates = "" if is_edit else """
-<p class="small">Start from a template:
-  <a class="link" href="/rules/new?template=disconnect">log on camera disconnect</a> ·
-  <a class="link" href="/rules/new?template=webhook">forward events to nxre</a> ·
-  <a class="link" href="/rules/new?template=blank">blank</a></p>"""
-    body = f"""
+    head = f"""
 <div class="topbar">
   <h1 style="margin:0">{title}</h1>
-  <a class="link" href="/rules">&larr; Rules</a>
+  <a class="link" href="/rules">&larr; NX rules</a>
 </div>
-{templates}{err}
-<form method="post" action="{action}">
-  <label for="c">Comment</label>
-  <input id="c" type="text" name="comment" value="{html.escape(comment)}"
-         placeholder="What does this rule do?">
+<p class="muted">This creates a <b>native NX rule</b> — it appears in NX and NX runs it.
+Fields mirror NX's own editor, pulled from your server.</p>
+{err}
+<form method="post" action="{action_url}" onsubmit="return serialize()">
+  <input type="hidden" name="payload" id="payload">
+  <label for="c">Name / comment</label>
+  <input id="c" type="text" placeholder="What does this rule do?">
 
-  <label for="et">Event type</label>
-  <select id="et" name="event_type">{_options(event_types, event_type)}</select>
-  <label for="ej">Event details (JSON)</label>
-  <textarea id="ej" name="event_json">{html.escape(event_json)}</textarea>
+  <h2>When <span class="small">— the event</span></h2>
+  <label for="etype">Event</label>
+  <select id="etype"></select>
+  <div id="efields"></div>
 
-  <label for="at">Action type</label>
-  <select id="at" name="action_type">{_options(action_types, action_type)}</select>
-  <label for="aj">Action details (JSON)</label>
-  <textarea id="aj" name="action_json">{html.escape(action_json)}</textarea>
+  <h2>Do <span class="small">— the action</span></h2>
+  <label for="atype">Action</label>
+  <select id="atype"></select>
+  <div id="afields"></div>
 
-  <div class="check"><input id="en" type="checkbox" name="enabled"{checked}>
+  <div class="check"><input id="en" type="checkbox" checked>
     <label for="en" style="margin:0">Enabled</label></div>
-
   <button class="block" type="submit">{"Save changes" if is_edit else "Create rule"}</button>
-  <p class="small">The type you pick above is written into the JSON's <code>type</code> field on save.
-     Leave the JSON as <code>{{}}</code> for a minimal rule.</p>
-</form>"""
-    return _page(f"{title} — NX Rules Engine", body, max_width=640)
+</form>
+<script>{_RULE_BUILDER_JS}
+EVENTS={json.dumps(events)};
+ACTIONS={json.dumps(actions)};
+CAMERAS={json.dumps(cameras)};
+DEVICE_FIELDS={json.dumps(sorted(_DEVICE_FIELD_NAMES))};
+INITIAL={json.dumps(initial)};
+boot();
+</script>"""
+    return _page(f"{title} — NX Rules Engine", head, max_width=680)
 
 
 # ---------------------------------------------------------------------------
@@ -305,9 +379,9 @@ def _automations_list_page(
 </div>
 <p class="muted">If-this-then-that rules run by nxre. <a class="btn" href="/automations/new">+ New automation</a></p>
 {banner}
-<div class="hint">Automations react to NX events sent to this service. If nothing triggers,
-create the <a class="link" href="/rules/new?template=webhook">forward-events-to-nxre</a> NX rule
-so events flow in.</div>
+<div class="hint">These run in <b>this service</b> — they do <b>not</b> appear in NX's own rule list
+(for rules that show in NX, use <a class="link" href="/rules">NX rules</a>). Automations react to
+NX events sent here, so make sure an NX rule forwards events to <code>/webhook/nx</code>.</div>
 <table>
   <tr><th>Name</th><th>State</th><th>When</th><th>Then do</th><th></th></tr>
   {rows}
@@ -545,49 +619,37 @@ def create_app(settings: Settings, system: str | None = None) -> FastAPI:
     app.state.system = system
     app.state.session_store = store
 
-    async def _manifest_types(client: NxClient) -> tuple[list[str], list[str]]:
-        try:
-            m = await Manifest.fetch(client)
-            return (m.event_types() or _FALLBACK_EVENTS), (m.action_types() or _FALLBACK_ACTIONS)
-        except (NxApiError, httpx.HTTPError, ValueError, TypeError):
-            return _FALLBACK_EVENTS, _FALLBACK_ACTIONS
+    async def _rule_builder_data() -> tuple[list, list, list]:
+        """Manifest event/action items + cameras for the native-rule builder dropdowns."""
+        events: list = []
+        actions: list = []
+        cameras: list = []
+        client = _client()
+        if client is not None:
+            async with client:
+                try:
+                    m = await Manifest.fetch(client)
+                    events, actions = m.event_items(), m.action_items()
+                except (NxApiError, httpx.HTTPError, ValueError, TypeError):
+                    pass
+                try:
+                    cameras = [
+                        {"id": d.get("id", ""), "name": d.get("name") or d.get("id", "")}
+                        for d in await client.get_devices() if d.get("id")
+                    ]
+                except (NxApiError, httpx.HTTPError, ValueError, TypeError):
+                    pass
+        return events, actions, cameras
 
-    def _template(name: str) -> tuple[str, dict, dict]:
-        if name == "disconnect":
-            r = repo.scaffold_write_to_log("Log when a camera disconnects")
-        elif name == "webhook":
-            r = repo.scaffold_webhook_rule(settings.webhook.public_url, "Forward NX events to nxre")
-        else:
-            return "", {"type": ""}, {"type": ""}
-        return r.comment, r.event, r.action
-
-    def _parse_rule_form(raw: str) -> tuple[str, bool, str, str, str, str, dict, dict]:
-        """Return (comment, enabled, event_type, action_type, event_json, action_json,
-        event_obj, action_obj). Raises ValueError with a friendly message on bad JSON."""
+    def _rule_payload(raw: str) -> tuple[str, bool, dict, dict]:
+        """Parse the builder's JSON payload → (comment, enabled, event, action)."""
         form = parse_qs(raw, keep_blank_values=True)
-        comment = (form.get("comment") or [""])[0]
-        enabled = "enabled" in form
-        event_type = (form.get("event_type") or [""])[0].strip()
-        action_type = (form.get("action_type") or [""])[0].strip()
-        event_json = (form.get("event_json") or ["{}"])[0]
-        action_json = (form.get("action_json") or ["{}"])[0]
-        try:
-            event = json.loads(event_json or "{}")
-            action = json.loads(action_json or "{}")
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Invalid JSON: {exc}") from None
-        if not isinstance(event, dict) or not isinstance(action, dict):
-            raise ValueError(  # noqa: TRY004 — user-facing validation, caller catches ValueError
-                'Event and Action must each be a JSON object, e.g. {"type": "..."}.'
-            )
-        # The dropdown wins for the type, so the two controls can't disagree.
-        if event_type:
-            event["type"] = event_type
-        if action_type:
-            action["type"] = action_type
+        data = json.loads((form.get("payload") or ["{}"])[0])
+        event = data.get("event") if isinstance(data.get("event"), dict) else {}
+        action = data.get("action") if isinstance(data.get("action"), dict) else {}
         if not event.get("type") or not action.get("type"):
-            raise ValueError("Pick both an event type and an action type.")
-        return comment, enabled, event_type, action_type, event_json, action_json, event, action
+            raise ValueError("Pick both an event and an action.")
+        return (data.get("comment") or "").strip(), bool(data.get("enabled", True)), event, action
 
     # -- browser UI: auth ---------------------------------------------------
     @app.get("/", response_class=HTMLResponse)
@@ -647,18 +709,12 @@ def create_app(settings: Settings, system: str | None = None) -> FastAPI:
         )
 
     @app.get("/rules/new", response_class=HTMLResponse)
-    async def rules_new(template: str = ""):
-        client = _client()
-        if client is None:
+    async def rules_new():
+        if _valid_token() is None:
             return RedirectResponse("/", status_code=303)
-        async with client:
-            ev_types, ac_types = await _manifest_types(client)
-        comment, event, action = _template(template or "blank")
-        return HTMLResponse(_rule_form_page(
-            system, "new", ev_types, ac_types, comment, True,
-            json.dumps(event, indent=2), json.dumps(action, indent=2),
-            event_type=event.get("type", ""), action_type=action.get("type", ""),
-        ))
+        events, actions, cameras = await _rule_builder_data()
+        return HTMLResponse(_rule_builder_page(
+            system, False, "/rules/create", events, actions, cameras, {}))
 
     @app.post("/rules/create")
     async def rules_create(request: Request):
@@ -668,27 +724,24 @@ def create_app(settings: Settings, system: str | None = None) -> FastAPI:
         if client is None:
             return RedirectResponse("/", status_code=303)
         raw = (await request.body()).decode("utf-8")
+        try:
+            comment, enabled, event, action = _rule_payload(raw)
+        except (ValueError, json.JSONDecodeError) as exc:
+            events, actions, cameras = await _rule_builder_data()
+            initial = json.loads((parse_qs(raw).get("payload") or ["{}"])[0] or "{}")
+            return HTMLResponse(_rule_builder_page(
+                system, False, "/rules/create", events, actions, cameras, initial,
+                error=str(exc)), status_code=400)
+        rule = NativeRule(comment=comment, enabled=enabled, event=event, action=action)
         async with client:
-            ev_types, ac_types = await _manifest_types(client)
-            try:
-                comment, enabled, et, at, ej, aj, event, action = _parse_rule_form(raw)
-            except ValueError as exc:
-                form = parse_qs(raw, keep_blank_values=True)
-                return HTMLResponse(_rule_form_page(
-                    system, "new", ev_types, ac_types,
-                    (form.get("comment") or [""])[0], "enabled" in form,
-                    (form.get("event_json") or ["{}"])[0], (form.get("action_json") or ["{}"])[0],
-                    (form.get("event_type") or [""])[0], (form.get("action_type") or [""])[0],
-                    error=str(exc),
-                ), status_code=400)
-            rule = NativeRule(comment=comment, enabled=enabled, event=event, action=action)
             try:
                 await client.create_rule(rule.to_api_body())
             except NxApiError as exc:
-                return HTMLResponse(_rule_form_page(
-                    system, "new", ev_types, ac_types, comment, enabled, ej, aj, et, at,
-                    error=f"NX rejected the rule: {exc}",
-                ), status_code=400)
+                events, actions, cameras = await _rule_builder_data()
+                return HTMLResponse(_rule_builder_page(
+                    system, False, "/rules/create", events, actions, cameras,
+                    {"comment": comment, "enabled": enabled, "event": event, "action": action},
+                    error=f"NX rejected the rule: {exc}"), status_code=400)
         return RedirectResponse("/rules?notice=Rule+created", status_code=303)
 
     @app.get("/rules/{rule_id}/edit", response_class=HTMLResponse)
@@ -697,16 +750,15 @@ def create_app(settings: Settings, system: str | None = None) -> FastAPI:
         if client is None:
             return RedirectResponse("/", status_code=303)
         async with client:
-            ev_types, ac_types = await _manifest_types(client)
             try:
                 rule = NativeRule.from_api(await client.get_rule(rule_id))
             except NxApiError as exc:
                 return RedirectResponse(f"/rules?error={html.escape(str(exc))}", status_code=303)
-        return HTMLResponse(_rule_form_page(
-            system, "edit", ev_types, ac_types, rule.comment, rule.enabled,
-            json.dumps(rule.event, indent=2), json.dumps(rule.action, indent=2),
-            event_type=rule.event_type or "", action_type=rule.action_type or "", rule_id=rule_id,
-        ))
+        events, actions, cameras = await _rule_builder_data()
+        initial = {"comment": rule.comment, "enabled": rule.enabled,
+                   "event": rule.event, "action": rule.action}
+        return HTMLResponse(_rule_builder_page(
+            system, True, f"/rules/{rule_id}/update", events, actions, cameras, initial))
 
     @app.post("/rules/{rule_id}/update")
     async def rules_update(rule_id: str, request: Request):
@@ -716,27 +768,24 @@ def create_app(settings: Settings, system: str | None = None) -> FastAPI:
         if client is None:
             return RedirectResponse("/", status_code=303)
         raw = (await request.body()).decode("utf-8")
+        try:
+            comment, enabled, event, action = _rule_payload(raw)
+        except (ValueError, json.JSONDecodeError) as exc:
+            events, actions, cameras = await _rule_builder_data()
+            initial = json.loads((parse_qs(raw).get("payload") or ["{}"])[0] or "{}")
+            return HTMLResponse(_rule_builder_page(
+                system, True, f"/rules/{rule_id}/update", events, actions, cameras, initial,
+                error=str(exc)), status_code=400)
+        rule = NativeRule(comment=comment, enabled=enabled, event=event, action=action)
         async with client:
-            ev_types, ac_types = await _manifest_types(client)
-            try:
-                comment, enabled, et, at, ej, aj, event, action = _parse_rule_form(raw)
-            except ValueError as exc:
-                form = parse_qs(raw, keep_blank_values=True)
-                return HTMLResponse(_rule_form_page(
-                    system, "edit", ev_types, ac_types,
-                    (form.get("comment") or [""])[0], "enabled" in form,
-                    (form.get("event_json") or ["{}"])[0], (form.get("action_json") or ["{}"])[0],
-                    (form.get("event_type") or [""])[0], (form.get("action_type") or [""])[0],
-                    rule_id=rule_id, error=str(exc),
-                ), status_code=400)
-            rule = NativeRule(comment=comment, enabled=enabled, event=event, action=action)
             try:
                 await client.update_rule(rule_id, rule.to_api_body())
             except NxApiError as exc:
-                return HTMLResponse(_rule_form_page(
-                    system, "edit", ev_types, ac_types, comment, enabled, ej, aj, et, at,
-                    rule_id=rule_id, error=f"NX rejected the update: {exc}",
-                ), status_code=400)
+                events, actions, cameras = await _rule_builder_data()
+                return HTMLResponse(_rule_builder_page(
+                    system, True, f"/rules/{rule_id}/update", events, actions, cameras,
+                    {"comment": comment, "enabled": enabled, "event": event, "action": action},
+                    error=f"NX rejected the update: {exc}"), status_code=400)
         return RedirectResponse("/rules?notice=Rule+updated", status_code=303)
 
     @app.post("/rules/{rule_id}/toggle")
